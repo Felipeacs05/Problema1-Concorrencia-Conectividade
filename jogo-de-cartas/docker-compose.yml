@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  servidor:
+    build: .
+    command: ['python', '-u', 'servidor.py']
+
+  cliente:
+    build: .
+    command: ['python', '-u', 'cliente.py']
+    depends_on:
+      - servidor
