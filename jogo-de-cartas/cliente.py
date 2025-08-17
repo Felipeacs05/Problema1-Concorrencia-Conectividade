@@ -97,8 +97,6 @@ with s:
 
 # .decode() converte os bytes recebidos de volta para uma string para exibição.
 print(f"Eco recebido: {data.decode()}")
-print("="*30)
 # Exibe o resultado final formatado.
 # A formatação ':.2f' limita o número de casas decimais a 2, para melhor leitura.
 print(f"LATÊNCIA (IDA E VOLTA): {latencia_em_ms:.2f} ms")
-print("="*30)
