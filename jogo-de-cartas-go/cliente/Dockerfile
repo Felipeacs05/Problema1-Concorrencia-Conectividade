@@ -11,7 +11,7 @@ COPY go.mod ./
 RUN go mod download
 
 # Copia todo o código-fonte do nosso projeto (servidor ou cliente).
-COPY ./servidor/ .
+COPY ./cliente/ .
 
 # O comando de compilação.
 # 'CGO_ENABLED=0' e 'GOOS=linux' garantem que ele crie um executável
