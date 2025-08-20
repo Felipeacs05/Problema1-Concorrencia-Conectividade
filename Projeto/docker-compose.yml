@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  servidor:
+    build:
+      context: .
+      dockerfile: ./servidor/Dockerfile
+
+  cliente:
+    build:
+      context: .
+      dockerfile: ./cliente/Dockerfile
+    depends_on:
+      - servidor

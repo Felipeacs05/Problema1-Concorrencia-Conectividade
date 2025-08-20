@@ -7,7 +7,7 @@ type Mensagem struct {
 
 type DadosLogin struct {
 	Nome string `json:"nome"`
-	Senha string `json:senha`
+	Senha string `json:"senha"`
 	Id string `json:"id"`
 }
 
@@ -16,5 +16,5 @@ type DadosErro struct {
 }
 
 type DadosCriarSala struct {
-	NomeDaSala string `json:"nomeDaSala`
+	NomeDaSala string `json:"nomeDaSala"`
 }

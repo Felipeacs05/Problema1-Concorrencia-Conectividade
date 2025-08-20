@@ -39,7 +39,7 @@ func main() {
 		return
 	}
 	defer listener.Close()
-	fmt.Printf("[SERVIDOR] Servidor ouvindo na porta %s\n", endereco)
+	fmt.Printf("[SERVIDOR] Servidor ouvindo na porta: %s\n", endereco)
 
 	for {
 		conn, err := listener.Accept()
