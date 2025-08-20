@@ -1,33 +1,20 @@
-// cliente/main.go
 package main
 
 import (
 	"fmt"
 	"net"
-	// 'strconv' é a caixa de ferramentas para conversões entre tipos de dados,
-	// principalmente de e para 'string' (texto).
 	"strconv"
-	// 'time' é a caixa de ferramentas para tudo relacionado a tempo: pegar a hora
-	// atual, medir durações, adicionar pausas, etc.
 	"time"
 )
 
 func main() {
     fmt.Println("--- EXECUTANDO O CÓDIGO DO CLIENTE ---")
 
-	// O endereço completo do servidor ao qual queremos nos conectar.
-	// 'servidor' é o nome que o Docker Compose dará ao contêiner do servidor.
-	// ':65432' é a porta que o servidor está ouvindo.
 	endereco := "servidor:65432"
 
-    // Adicionamos uma pausa deliberada. Em um ambiente Docker, às vezes o contêiner
-    // do cliente pode iniciar um milissegundo antes do servidor estar 100% pronto
-    // para aceitar conexões. Esta pausa dá uma pequena margem de segurança.
     time.Sleep(2 * time.Second)
 
-	// net.Dial() é a função do cliente. Ela "disca" para o endereço do servidor
-	// tentando estabelecer uma conexão. É uma chamada bloqueante: o programa
-	// espera aqui até que a conexão seja estabelecida ou falhe.
+	// Chamada bloequante: Tenta se conectar com o servidor
 	conn, err := net.Dial("tcp", endereco)
 	if err != nil {
 		fmt.Printf("[CLIENTE] Não foi possível conectar ao servidor: %s\n", err)
