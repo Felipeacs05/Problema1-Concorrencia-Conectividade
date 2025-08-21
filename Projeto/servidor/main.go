@@ -1,8 +1,7 @@
 package main
 
 import (
-	"bufio" // Para o Scanner
-	"encoding/json" // Para Marshalling/Unmarshallin
+	"encoding/json" 
 	"fmt"
 	"net"
 	"meujogo/protocolo"
@@ -14,22 +13,25 @@ func handleConnection(conn net.Conn){
 	fmt.Printf("[SERVIDOR] Nova conexão de %s\n", conn.RemoteAddr().String())
 
 	//Ler a conexão
-	scanner := bufio.NewScanner(conn)
+	decoder := json.NewDecoder(conn)
 
-	for scanner.Scan(){
-		jsonTexto := scanner.Text()
-
+	for{
 		var msg protocolo.Mensagem
 
-		err := json.Unmarshal([]byte(jsonTexto), &msg)
+		err := decoder.Decode(&msg)
 		if err != nil {
-			fmt.Printf("[SERVIDOR] Erro ao decodificar JSON: %s\n", err)
-			continue
+			// Se o erro for 'io.EOF', significa que o cliente desconectou de forma limpa.
+			fmt.Printf("[SERVIDOR] Conexão com %s fechada.\n", conn.RemoteAddr().String())
+			return // Encerra a goroutine.
 		}
+
+		fmt.Printf("[SERVIDOR] JSON recebido: %+v\n", msg)
 
 		switch msg.Comando {
 		case "LOGIN":
 			fmt.Println("[SERVIDOR] Comando de LOGIN recebido")
+		case "CRIAR_SALA":
+			fmt.Println("[SERVIDOR] Comando de CRIAR_SALA recebido.")
 		default:
 			fmt.Printf("[SERVIDOR] Comando desconhecido recebido: %s\n", msg.Comando)	
 		}
