@@ -30,27 +30,27 @@ func main() {
 	//Receber servidor
 	decoder := json.NewDecoder(conn)
 
-	dados := protocolo.DadosLogin{
-		Nome:  "Felipe",
-		Senha: "Felipe123",
-		Id:    "1",
+	dados := protocolo.DadosCriarSala{
+		NomeDaSala: "Primeira sala",
 	}
 
-	msg := protocolo.Mensagem{
+	msgLogin := protocolo.Mensagem{
 		Comando: "CRIAR_SALA",
 		Dados:   dados,
 	}
 
-	fmt.Printf("Cliente enviando mensagem para servidor: '%+v'\n", encoder)
-	err = encoder.Encode(msg)
+	fmt.Printf("Cliente enviando mensagem para servidor: '%+v'\n", msgLogin)
+	err = encoder.Encode(msgLogin)
 
 	if err != nil {
 		fmt.Printf("Erro ao enviar mensagem: %s\n", err)
 		return
 	}
 
-	fmt.Println("[CLIENTE] Mensagem de LOGIN enviada com sucesso\n")
+	fmt.Printf("[CLIENTE] Mensagem: '%s' enviada com sucesso\n", msgLogin)
 
+	//Cliente recebe de servidor
+	fmt.Println("[CLIENTE] Esperando resposta do servidor...")
 	var resposta protocolo.Mensagem
 	err = decoder.Decode(&resposta)
 	if err != nil {
@@ -58,6 +58,6 @@ func main() {
 		return
 	}
 
-	fmt.Printf("[%s] Resposta recebida do servidor: '%+v\n' ", dados.Nome, resposta)
+	fmt.Printf("[%s] Resposta recebida do servidor: '%+v\n' ", dados.NomeDaSala, resposta)
 
 }

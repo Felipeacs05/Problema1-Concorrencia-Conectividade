@@ -22,3 +22,12 @@ type DadosCriarSala struct {
 type DadosSalaCriada struct{
 	SalaID string `json:"salaID"`
 }
+
+type DadosEnviarChat struct{
+	Texto string `json:"mensagem"`
+}
+
+type DadosReceberChat struct{
+	Texto string `json:"mensagem"`
+	NomeJogadorEnviou string `json:"NomeJogadorEnviou"`
+}
