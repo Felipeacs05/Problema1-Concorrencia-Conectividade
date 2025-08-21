@@ -18,3 +18,7 @@ type DadosErro struct {
 type DadosCriarSala struct {
 	NomeDaSala string `json:"nomeDaSala"`
 }
+
+type DadosSalaCriada struct{
+	SalaID string `json:"salaID"`
+}

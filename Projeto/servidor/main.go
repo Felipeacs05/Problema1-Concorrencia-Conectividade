@@ -23,8 +23,11 @@ func handleConnection(conn net.Conn, servidor *Servidor){
 
 	fmt.Printf("[SERVIDOR] Nova conexão de %s\n", conn.RemoteAddr().String())
 
-	//Ler a conexão
+	//Receber do cliente
 	decoder := json.NewDecoder(conn)
+
+	//Enviar para o cliente
+	encoder := json.NewEncoder(conn)
 
 	for{
 		var msg protocolo.Mensagem
@@ -44,6 +47,7 @@ func handleConnection(conn net.Conn, servidor *Servidor){
 		case "CRIAR_SALA":
 			fmt.Println("[SERVIDOR] Comando de CRIAR_SALA recebido.")
 
+			//Ativa mutex
 			servidor.mutex.Lock()
 
 			novaSala := &Sala {
@@ -52,9 +56,25 @@ func handleConnection(conn net.Conn, servidor *Servidor){
 			}
 			servidor.salas[novaSala.ID] = novaSala
 
+			dadosResposta := protocolo.DadosSalaCriada{
+				SalaID: novaSala.ID,
+			}
+
+			resposta := protocolo.Mensagem{
+				Comando: "SALA_CRIADA",
+				Dados: dadosResposta,
+			}
+
+			err = encoder.Encode(resposta)
+			if err != nil{
+				fmt.Printf("[SERVIDOR] Erro ao enviar a mensagem: %s\n", err)
+			}
+
+			//Libera mutex
 			servidor.mutex.Unlock()
 
 			fmt.Printf("[SERVIDOR] Sala '%s' criada com sucesso para %s\n", novaSala.ID, conn.RemoteAddr())
+		
 		default:
 			fmt.Printf("[SERVIDOR] Comando desconhecido recebido: %s\n", msg.Comando)	
 		}

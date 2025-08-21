@@ -24,7 +24,11 @@ func main(){
 	defer conn.Close()
 	fmt.Printf("[CLIENTE] Conectado ao servidor em %s\n", endereco)
 
+	//Enviar servidor
 	encoder := json.NewEncoder(conn)
+
+	//Receber servidor
+	decoder := json.NewEncoder(conn)
 
 	dados := protocolo.DadosLogin{
 		Nome: "Felipe",
@@ -46,4 +50,17 @@ func main(){
 	}
 
 	fmt.Println("[CLIENTE] Mensagem de LOGIN enviada com sucesso")
+
+	var resposta protocolo.Mensagem
+
+	for{
+		err = decoder.Decode(&resposta)
+		if err == nil{
+			fmt.Printf("[%s] Resposta recebida do servidor: '%s' ", dados.Nome, resposta)
+			return
+		}
+	}
+
+
+
 }
