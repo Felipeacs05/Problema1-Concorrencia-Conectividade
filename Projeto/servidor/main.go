@@ -34,7 +34,7 @@ func handleConnection(conn net.Conn, servidor *Servidor){
 			// Se o erro for 'io.EOF', significa que o cliente desconectou de forma limpa.
 			fmt.Printf("[SERVIDOR] Conexão com %s fechada.\n", conn.RemoteAddr().String())
 			return // Encerra a goroutine.
-		}
+		}//
 
 		fmt.Printf("[SERVIDOR] JSON recebido: %+v\n", msg)
 
