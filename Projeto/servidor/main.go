@@ -5,9 +5,20 @@ import (
 	"fmt"
 	"net"
 	"meujogo/protocolo"
+	"sync"
 )
 
-func handleConnection(conn net.Conn){
+type Sala struct {
+	ID string
+	Jogadores []net.Conn
+}
+
+type Servidor struct {
+	salas map[string]*Sala
+	mutex sync.Mutex
+}
+
+func handleConnection(conn net.Conn, servidor *Servidor){
 	defer conn.Close()
 
 	fmt.Printf("[SERVIDOR] Nova conexão de %s\n", conn.RemoteAddr().String())
@@ -32,6 +43,18 @@ func handleConnection(conn net.Conn){
 			fmt.Println("[SERVIDOR] Comando de LOGIN recebido")
 		case "CRIAR_SALA":
 			fmt.Println("[SERVIDOR] Comando de CRIAR_SALA recebido.")
+
+			servidor.mutex.Lock()
+
+			novaSala := &Sala {
+				ID: "sala1",
+				Jogadores: []net.Conn{conn},
+			}
+			servidor.salas[novaSala.ID] = novaSala
+
+			servidor.mutex.Unlock()
+
+			fmt.Printf("[SERVIDOR] Sala '%s' criada com sucesso para %s\n", novaSala.ID, conn.RemoteAddr())
 		default:
 			fmt.Printf("[SERVIDOR] Comando desconhecido recebido: %s\n", msg.Comando)	
 		}
@@ -49,6 +72,10 @@ func main(){
 		return
 	}
 
+	servidor := &Servidor{
+		salas: make(map[string]*Sala),
+	}
+
 	defer listener.Close()
 	fmt.Printf("[SERVIDOR] Servidor ouvindo na porta: %s\n", endereco)
 
@@ -59,6 +86,6 @@ func main(){
 			continue
 		}
 
-		go handleConnection(conn)
+		go handleConnection(conn, servidor)
 	}
 }
