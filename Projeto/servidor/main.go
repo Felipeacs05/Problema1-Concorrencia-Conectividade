@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"meujogo/protocolo"
 	"net"
 	"sync"
@@ -57,9 +56,6 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 
 	decoder := json.NewDecoder(cliente.Conn)
 
-	//Enviar para o cliente
-	encoder := json.NewEncoder(cliente.Conn)
-
 	for {
 		var msg protocolo.Mensagem
 		if err := decoder.Decode(&msg); err != nil {
@@ -94,7 +90,7 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 
 			cliente.Mailbox <- resposta
 
-			fmt.Printf("[SERVIDOR] Sala '%s' criada com sucesso para %s\n", novaSala.ID, conn.RemoteAddr())
+			fmt.Printf("[SERVIDOR] Sala '%s' criada com sucesso para %s\n", novaSala.ID, cliente.Conn.RemoteAddr())
 
 		case "ENVIAR_CHAT":
 			fmt.Printf("[SERVIDOR] Chat de %s: %+v\n", cliente.Nome, msg.Dados)
@@ -116,7 +112,7 @@ func (servidor *Servidor) clienteWriter(cliente *Cliente) {
 	}
 }
 
-func (servidor *Servidor) broadcastChat(remetente *Cliente, texto String) {
+func (servidor *Servidor) broadcastChat(remetente *Cliente, texto string) {
 	servidor.mutex.Lock()
 	defer servidor.mutex.Unlock() //Para no final der unlock
 
