@@ -7,8 +7,6 @@ type Mensagem struct {
 
 type DadosLogin struct {
 	Nome string `json:"nome"`
-	Senha string `json:"senha"`
-	Id string `json:"id"`
 }
 
 type DadosErro struct {
@@ -28,6 +26,6 @@ type DadosEnviarChat struct{
 }
 
 type DadosReceberChat struct{
-	NomeJogador string `json:"NomeJogador"`
-	Texto string `json:"mensagem"`
+	NomeJogador string `json:"nomeJogador"`
+	Texto string `json:"texto"`
 }

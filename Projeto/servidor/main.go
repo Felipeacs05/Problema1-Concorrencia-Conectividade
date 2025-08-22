@@ -126,6 +126,9 @@ func (servidor *Servidor) broadcastChat(remetente *Cliente, texto string) {
 		Dados:   dados,
 	}
 
+	jsonParaDebug, _ := json.Marshal(msg)
+	fmt.Printf("[SERVIDOR-DEBUG] Retransmitindo JSON: %s\n", string(jsonParaDebug))
+
 	fmt.Printf("[SERVIDOR] Retransmitindo chat de %s para %d clientes\n", remetente.Nome, len(servidor.clientes))
 
 	for _, cliente := range servidor.clientes {
