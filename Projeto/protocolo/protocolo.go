@@ -24,10 +24,10 @@ type DadosSalaCriada struct{
 }
 
 type DadosEnviarChat struct{
-	Texto string `json:"mensagem"`
+	Texto string `json:"texto"`
 }
 
 type DadosReceberChat struct{
+	NomeJogador string `json:"NomeJogador"`
 	Texto string `json:"mensagem"`
-	NomeJogadorEnviou string `json:"NomeJogadorEnviou"`
 }

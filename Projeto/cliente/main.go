@@ -58,6 +58,9 @@ func main() {
 		return
 	}
 
+
 	fmt.Printf("[%s] Resposta recebida do servidor: '%+v\n' ", dados.NomeDaSala, resposta)
+
+	
 
 }

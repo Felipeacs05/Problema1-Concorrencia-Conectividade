@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json" 
 	"fmt"
+	"io"
 	"net"
 	"meujogo/protocolo"
 	"sync"
@@ -14,14 +15,42 @@ type Sala struct {
 }
 
 type Servidor struct {
+	clientes map[net.Conn]*Cliente
 	salas map[string]*Sala
 	mutex sync.Mutex
 }
+
+type Cliente struct {
+	Conn net.Conn
+	Nome string
+	Encoder *json.Encoder
+	Mailbox chan protocolo.Mensagem
+}
+
 
 func handleConnection(conn net.Conn, servidor *Servidor){
 	defer conn.Close()
 
 	fmt.Printf("[SERVIDOR] Nova conexão de %s\n", conn.RemoteAddr().String())
+
+	cliente := &Cliente{
+		Conn: conn,
+		Nome: conn.RemoteAddr().String(),
+		Encoder: json.NewEncoder(conn),
+		Mailbox: make(chan protocolo.Mensagem, 10),
+	}
+
+	servidor.mutex.Lock()
+	servidor.clientes[conn] = cliente
+	servidor.mutex.Unlock()
+
+	go servidor.clienteWriter(cliente)
+
+	servidor.clienteReader(cliente)
+
+	servidor.mutex.Lock()
+	delete(servidor.clientes, conn)
+	servidor.mutex.Unlock()
 
 	//Receber do cliente
 	decoder := json.NewDecoder(conn)
@@ -75,12 +104,37 @@ func handleConnection(conn net.Conn, servidor *Servidor){
 
 			fmt.Printf("[SERVIDOR] Sala '%s' criada com sucesso para %s\n", novaSala.ID, conn.RemoteAddr())
 		
+		case "ENVIAR_MENSAGEM":
+			servidor.mutex.Lock()
+			servidor.clientes[conn] = cliente
+			servidor.mutex.Unlock()
+
+			go servidor.clienteWriter(cliente)
+
+			servidor.clienteReader(cliente)
+
+			servidor.mutex.Lock()
+			delete(servidor.clientes, conn)
+			servidor.mutex.Unlock()
+
 		default:
 			fmt.Printf("[SERVIDOR] Comando desconhecido recebido: %s\n", msg.Comando)	
 		}
 
 	}
 }
+
+func (s *Servidor) clienteReader(cliente *Cliente){
+	decoder := json.NewDecoder(cliente.conn)
+	for{
+		
+	}
+}
+
+func (s*Servidor) clienteWriter(cliente *Cliente){
+
+}
+
 func main(){
 	fmt.Println("Executando o código do servidor...")
 
