@@ -51,22 +51,6 @@ func (servidor *Servidor) handleConnection(conn net.Conn) {
 	delete(servidor.clientes, conn)
 	servidor.mutex.Unlock()
 
-	//Receber do cliente
-	decoder := json.NewDecoder(conn)
-
-	for {
-		var msg protocolo.Mensagem
-
-		err := decoder.Decode(&msg)
-		if err != nil {
-			// Se o erro for 'io.EOF', significa que o cliente desconectou de forma limpa.
-			fmt.Printf("[SERVIDOR] Conexão com %s fechada.\n", conn.RemoteAddr().String())
-			return // Encerra a goroutine.
-		} //
-
-		fmt.Printf("[SERVIDOR] JSON recebido: %+v\n", msg)
-
-	}
 }
 
 func (servidor *Servidor) clienteReader(cliente *Cliente) {
@@ -79,11 +63,7 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 	for {
 		var msg protocolo.Mensagem
 		if err := decoder.Decode(&msg); err != nil {
-			if err == io.EOF {
-				break
-			}
-			fmt.Printf("[SERVIDOR] Erro de leitura de %s: %s\n", cliente.Nome, err)
-			break
+			return
 		}
 
 		switch msg.Comando {
@@ -104,19 +84,15 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 			dadosResposta := protocolo.DadosSalaCriada{
 				SalaID: novaSala.ID,
 			}
-
 			resposta := protocolo.Mensagem{
 				Comando: "SALA_CRIADA",
 				Dados:   dadosResposta,
 			}
 
-			err := encoder.Encode(resposta)
-			if err != nil {
-				fmt.Printf("[SERVIDOR] Erro ao enviar a mensagem: %s\n", err)
-			}
-
 			//Libera mutex
 			servidor.mutex.Unlock()
+
+			cliente.Mailbox <- resposta
 
 			fmt.Printf("[SERVIDOR] Sala '%s' criada com sucesso para %s\n", novaSala.ID, conn.RemoteAddr())
 
@@ -135,7 +111,7 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 func (servidor *Servidor) clienteWriter(cliente *Cliente) {
 	for msg := range cliente.Mailbox {
 		if err := cliente.Encoder.Encode(msg); err != nil {
-			fmt.Printf("[SERVIDOR] Erro de escrita para %s: %s\n", cliente.Nome)
+			fmt.Printf("[SERVIDOR] Erro de escrita para %s: %s\n", cliente.Nome, err)
 		}
 	}
 }
@@ -153,6 +129,8 @@ func (servidor *Servidor) broadcastChat(remetente *Cliente, texto String) {
 		Comando: "RECEBER_CHAT",
 		Dados:   dados,
 	}
+
+	fmt.Printf("[SERVIDOR] Retransmitindo chat de %s para %d clientes\n", remetente.Nome, len(servidor.clientes))
 
 	for _, cliente := range servidor.clientes {
 		cliente.Mailbox <- msg
