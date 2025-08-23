@@ -41,7 +41,7 @@ Para executar o projeto, você precisará ter o **Docker** e o **Docker Compose*
 1.  **Clone o repositório:**
 
     ```bash
-    git clone <URL_DO_SEU_REPOSITORIO_GIT>
+    git clone https://github.com/Felipeacs05/Problema1-Concorrencia-Conectividade
     cd Projeto/
     ```
 
