@@ -116,7 +116,7 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 
 			var dadosChat protocolo.DadosEnviarChat
 
-			fmt.Printf("[SERVIDOR] Chat de %s: %+v\n", cliente.Nome, msg.Dados)
+			fmt.Printf("[SERVIDOR] Chat de %s: %+v\n", cliente.Nome, string(msg.Dados))
 
 			if err := json.Unmarshal(msg.Dados, &dadosChat); err != nil{
 				fmt.Printf("[SERVIDOR] Erro ao decodificar dados do chat: %s\n", err)
@@ -163,7 +163,7 @@ func (servidor *Servidor) broadcastChat(remetente *Cliente, texto string) {
 	jsonParaDebug, _ := json.Marshal(msg)
 	fmt.Printf("[SERVIDOR-DEBUG] Retransmitindo JSON: %s\n", string(jsonParaDebug))
 
-	fmt.Printf("[SERVIDOR] Retransmitindo chat de %s para %d clientes\n", remetente.Nome, len(servidor.clientes))
+	fmt.Printf("[SERVIDOR] Retransmitindo chat de %s para %d clientes\n", remetente.Nome, len(servidor.clientes)-1)
 
 	for _, cliente := range servidor.clientes {
 		if cliente.Conn != remetente.Conn{
