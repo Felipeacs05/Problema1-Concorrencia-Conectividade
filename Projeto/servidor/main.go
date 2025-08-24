@@ -31,6 +31,7 @@ func (servidor *Servidor) handleConnection(conn net.Conn) {
 
 	fmt.Printf("[SERVIDOR] Nova conexão de %s\n", conn.RemoteAddr().String())
 
+	
 	cliente := &Cliente{
 		Conn:    conn,
 		Nome:    conn.RemoteAddr().String(),
@@ -64,7 +65,17 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 
 		switch msg.Comando {
 		case "LOGIN":
-			cliente.Nome = "JogadorLogado"
+			var dadosLogin protocolo.DadosLogin
+
+			err := json.Unmarshal(msg.Dados, &dadosLogin)
+			if err != nil{
+				fmt.Printf("[SERVIDOR] Erro ao decodificar dados de login: %s\n", err)
+				continue
+			}
+
+			cliente.Nome = dadosLogin.Nome
+			fmt.Printf("Novo login efetuado [JOGADOR: %s]\n", cliente.Nome)
+
 		case "CRIAR_SALA":
 			fmt.Println("[SERVIDOR] Comando de CRIAR_SALA recebido.")
 
@@ -80,9 +91,16 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 			dadosResposta := protocolo.DadosSalaCriada{
 				SalaID: novaSala.ID,
 			}
+
+			jsonDados, err := json.Marshal(dadosResposta)
+			if err != nil{
+				fmt.Printf("[SERVIDOR] Erro ao empacotar dados da resposta: %s\n", err)
+				return
+			}
+
 			resposta := protocolo.Mensagem{
 				Comando: "SALA_CRIADA",
-				Dados:   dadosResposta,
+				Dados:   jsonDados,
 			}
 
 			//Libera mutex
@@ -90,13 +108,22 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 
 			cliente.Mailbox <- resposta
 
+			
+
 			fmt.Printf("[SERVIDOR] Sala '%s' criada com sucesso para %s\n", novaSala.ID, cliente.Conn.RemoteAddr())
 
 		case "ENVIAR_CHAT":
+
+			var dadosChat protocolo.DadosEnviarChat
+
 			fmt.Printf("[SERVIDOR] Chat de %s: %+v\n", cliente.Nome, msg.Dados)
-			if dados, ok := msg.Dados.(map[string]interface{}); ok {
-				servidor.broadcastChat(cliente, dados["texto"].(string))
+
+			if err := json.Unmarshal(msg.Dados, &dadosChat); err != nil{
+				fmt.Printf("[SERVIDOR] Erro ao decodificar dados do chat: %s\n", err)
+				continue
 			}
+
+			servidor.broadcastChat(cliente, dadosChat.Texto)
 		default:
 			fmt.Printf("[SERVIDOR] Comando desconhecido recebido: %s\n", msg.Comando)
 
@@ -121,9 +148,16 @@ func (servidor *Servidor) broadcastChat(remetente *Cliente, texto string) {
 		Texto:       texto,
 	}
 
+	jsonDados, err := json.Marshal(dados)
+			if err != nil{
+				fmt.Printf("[SERVIDOR] Erro ao empacotar dados da resposta: %s\n", err)
+				return
+			}
+
+
 	msg := protocolo.Mensagem{
 		Comando: "RECEBER_CHAT",
-		Dados:   dados,
+		Dados:   jsonDados,
 	}
 
 	jsonParaDebug, _ := json.Marshal(msg)
@@ -132,7 +166,9 @@ func (servidor *Servidor) broadcastChat(remetente *Cliente, texto string) {
 	fmt.Printf("[SERVIDOR] Retransmitindo chat de %s para %d clientes\n", remetente.Nome, len(servidor.clientes))
 
 	for _, cliente := range servidor.clientes {
-		cliente.Mailbox <- msg
+		if cliente.Conn != remetente.Conn{
+			cliente.Mailbox <- msg
+		}
 	}
 }
 
