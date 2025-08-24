@@ -6,16 +6,18 @@ import (
 	"meujogo/protocolo"
 	"net"
 	"sync"
+	"time"
 )
 
 type Sala struct {
 	ID        string
-	Jogadores []net.Conn
+	Jogadores []*Cliente
 }
 
 type Servidor struct {
 	clientes map[net.Conn]*Cliente
 	salas    map[string]*Sala
+	filaDeEspera []*Cliente
 	mutex    sync.Mutex
 }
 
@@ -24,6 +26,7 @@ type Cliente struct {
 	Nome    string
 	Encoder *json.Encoder
 	Mailbox chan protocolo.Mensagem
+	Sala *Sala
 }
 
 func (servidor *Servidor) handleConnection(conn net.Conn) {
@@ -76,41 +79,54 @@ func (servidor *Servidor) clienteReader(cliente *Cliente) {
 			cliente.Nome = dadosLogin.Nome
 			fmt.Printf("Novo login efetuado [JOGADOR: %s]\n", cliente.Nome)
 
-		case "CRIAR_SALA":
-			fmt.Println("[SERVIDOR] Comando de CRIAR_SALA recebido.")
-
-			//Ativa mutex
+		case "ENTRAR_NA_FILA":
+			fmt.Printf("[SERVIDOR] Cliente '%s' entrou na fila de espera. \n", cliente.Nome)
 			servidor.mutex.Lock()
+			servidor.filaDeEspera = append(servidor.filaDeEspera, cliente)
 
-			novaSala := &Sala{
-				ID:        "sala1",
-				Jogadores: []net.Conn{cliente.Conn},
+			if len(servidor.filaDeEspera) >= 2 {
+				jogador1 := servidor.filaDeEspera[0]
+				jogador2 := servidor.filaDeEspera[1]
+				servidor.filaDeEspera = servidor.filaDeEspera[2:]
+
+				salaID := fmt.Sprintf("sala-%d", time.Now().UnixNano())
+				novaSala := &Sala{
+					ID: salaID,
+					Jogadores: []*Cliente{jogador1, jogador2},
+				}
+				servidor.salas[salaID] = novaSala
+
+				jogador1.Sala = novaSala
+				jogador2.Sala = novaSala
+
+				fmt.Printf("[SERVIDOR] Partida encontrada! Sala '%s' criada para '%s' e '%s'", salaID, jogador1, jogador2)
+
+				//Notificar os jogadores
+				dadosP1 := protocolo.DadosPartidaEncontrada{
+					SalaID: salaID,
+					OponenteNome: jogador2.Nome,
+				}
+
+				jsonDadosP1, _ := json.Marshal(dadosP1)
+				msgP1 := protocolo.Mensagem{
+					Comando: "PARTIDA_ENCONTRADA",
+					Dados: jsonDadosP1,
+				}
+				jogador1.Mailbox <- msgP1
+
+				dadosP2 := protocolo.DadosPartidaEncontrada{
+					SalaID: salaID,
+					OponenteNome: jogador1.Nome,
+				}
+				jsonDadosP2,_ := json.Marshal(dadosP2)
+				msgP2 := protocolo.Mensagem{
+					Comando: "PARTIDA_ENCONTRADA",
+					Dados: jsonDadosP2,
+				}
+				jogador2.Mailbox <- msgP2
 			}
-			servidor.salas[novaSala.ID] = novaSala
 
-			dadosResposta := protocolo.DadosSalaCriada{
-				SalaID: novaSala.ID,
-			}
-
-			jsonDados, err := json.Marshal(dadosResposta)
-			if err != nil{
-				fmt.Printf("[SERVIDOR] Erro ao empacotar dados da resposta: %s\n", err)
-				return
-			}
-
-			resposta := protocolo.Mensagem{
-				Comando: "SALA_CRIADA",
-				Dados:   jsonDados,
-			}
-
-			//Libera mutex
 			servidor.mutex.Unlock()
-
-			cliente.Mailbox <- resposta
-
-			
-
-			fmt.Printf("[SERVIDOR] Sala '%s' criada com sucesso para %s\n", novaSala.ID, cliente.Conn.RemoteAddr())
 
 		case "ENVIAR_CHAT":
 
@@ -186,6 +202,7 @@ func main() {
 	servidor := &Servidor{
 		clientes: make(map[net.Conn]*Cliente),
 		salas:    make(map[string]*Sala),
+		filaDeEspera: make([]*Cliente, 0),
 	}
 
 	defer listener.Close()

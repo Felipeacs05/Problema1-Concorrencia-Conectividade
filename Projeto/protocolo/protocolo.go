@@ -31,3 +31,8 @@ type DadosReceberChat struct {
 	NomeJogador string `json:"nomeJogador"`
 	Texto       string `json:"texto"`
 }
+
+type DadosPartidaEncontrada struct {
+	SalaID string `json:"salaID"`
+	OponenteNome string `json:"oponenteNome"`
+}

@@ -7,7 +7,6 @@ import (
 	"os"
 	"meujogo/protocolo"
 	"net"
-	"time"
 )
 
 func lerServidor(conn net.Conn){
@@ -30,33 +29,25 @@ func lerServidor(conn net.Conn){
 			}
 			
 			fmt.Printf("\r%s: %s\n> ", dadosChat.NomeJogador, dadosChat.Texto)
-		case "SALA_CRIADA_SUCESSO":
-			var dadosSala protocolo.DadosCriarSala
-			if err := json.Unmarshal(msg.Dados, &dadosSala); err == nil {
-				fmt.Println("[CLIENTE] Erro ao ler dados do chat: ", err)
-				return
+		case "PARTIDA_ENCONTRADA":
+			var dadosPartida protocolo.DadosPartidaEncontrada
+			if err := json.Unmarshal(msg.Dados, &dadosPartida); err == nil {
+				fmt.Printf("\r[SISTEMA] Partida encontrada! Você está na sala '%s' com '%s' \n", dadosPartida.SalaID, dadosPartida.OponenteNome)
 			}
-
-			fmt.Println("Parabéns! Acaba de criar uma sala")
 		}
 	}
 }
 
 func main() {
 	fmt.Println("--- Jogo de Cartas Multiplayer ---")
-
 	scanner := bufio.NewScanner(os.Stdin)
 
 	fmt.Print("Digite seu nome de usuário: ")
-
 	scanner.Scan()
-
 	nomeJogador := scanner.Text()
 
 	//Conexão Com servidor ----
 	endereco := "servidor:65432"
-
-	time.Sleep(2 * time.Second)
 
 	conn, err := net.Dial("tcp", endereco)
 	if err != nil {
@@ -66,8 +57,6 @@ func main() {
 
 	defer conn.Close()
 	fmt.Printf("[CLIENTE] Conectado como %s ao servidor em %s\n", nomeJogador, endereco)
-
-	//-------------------------
 	
 	//Enviar login
 	encoder := json.NewEncoder(conn)
@@ -86,17 +75,24 @@ func main() {
 		Comando: "LOGIN",
 		Dados: jsonCliente,
 	}
-
 	if err := encoder.Encode(msgLogin); err != nil{
 		fmt.Printf("Erro ao enviar mesangem de Login: %s", err)
 	}
 
+	//Entrar na FILA
+	msgFila := protocolo.Mensagem{
+		Comando: "ENTRAR_NA_FILA",
+		Dados: nil,
+	}
+	if err := encoder.Encode(msgFila); err != nil{
+		fmt.Printf("Erro ao entrar na fila: %s\n", err)
+		return
+	}
 
 	go lerServidor(conn)
 
-	fmt.Print("> ")
-
 	//Iniciar loop do chat
+	fmt.Print("> ")
 	for scanner.Scan(){
 		texto := scanner.Text()
 
