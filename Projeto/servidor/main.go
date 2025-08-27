@@ -40,6 +40,7 @@ func (servidor *Servidor) handleConnection(conn net.Conn) {
 		Nome:    conn.RemoteAddr().String(),
 		Encoder: json.NewEncoder(conn),
 		Mailbox: make(chan protocolo.Mensagem, 10),
+    Sala: nil, // inicia esse atributo para verificar na hora das mensagens
 	}
 
 	servidor.mutex.Lock()
@@ -181,11 +182,14 @@ func (servidor *Servidor) broadcastChat(remetente *Cliente, texto string) {
 
 	fmt.Printf("[SERVIDOR] Retransmitindo chat de %s para %d clientes\n", remetente.Nome, len(servidor.clientes)-1)
 
-	for _, cliente := range servidor.clientes {
+  // Verifica se o remetente está em uma sala
+  if remetente.Sala != nil {
+	for _, cliente := range remetente.Sala.Jogadores { // o range no vetor da sala,  caso contrário todos recebem a mensagem
 		if cliente.Conn != remetente.Conn{
 			cliente.Mailbox <- msg
 		}
 	}
+  }
 }
 
 func main() {
