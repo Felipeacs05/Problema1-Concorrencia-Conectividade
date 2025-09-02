@@ -1,40 +1,56 @@
+// Projeto/servidor/main.go
 package main
 
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"meujogo/protocolo"
 	"net"
 	"sync"
 	"time"
 )
 
-type Sala struct {
-	ID        string
-	Jogadores []*Cliente
-}
-
-type Servidor struct {
-	clientes map[net.Conn]*Cliente
-	salas    map[string]*Sala
-	filaDeEspera []*Cliente
-	mutex    sync.Mutex
-}
-
 type Cliente struct {
 	Conn    net.Conn
 	Nome    string
 	Encoder *json.Encoder
 	Mailbox chan protocolo.Mensagem
-	Sala *Sala
+	Sala    *Sala
 }
 
-func (servidor *Servidor) handleConnection(conn net.Conn) {
+type Sala struct {
+	ID        string
+	Jogadores []*Cliente
+	mutex     sync.Mutex // Cada sala agora tem sua própria trava para suas operações internas.
+}
+
+type Servidor struct {
+	clientes     map[net.Conn]*Cliente
+	salas        map[string]*Sala
+	filaDeEspera []*Cliente
+	mutex        sync.Mutex // A trava global para operações globais (login, matchmaking).
+}
+
+// broadcast agora é um método da Sala e é seguro.
+func (sala *Sala) broadcast(remetente *Cliente, msg protocolo.Mensagem) {
+	sala.mutex.Lock()
+	defer sala.mutex.Unlock()
+
+	for _, jogador := range sala.Jogadores {
+		if jogador.Conn != remetente.Conn {
+			// Usamos um select para não bloquear caso a mailbox do outro jogador esteja cheia.
+			select {
+			case jogador.Mailbox <- msg:
+			default:
+				fmt.Printf("[SALA %s] Mailbox do jogador %s cheia. Mensagem descartada.\n", sala.ID, jogador.Nome)
+			}
+		}
+	}
+}
+
+func (s *Servidor) handleConnection(conn net.Conn) {
 	defer conn.Close()
-
-	fmt.Printf("[SERVIDOR] Nova conexão de %s\n", conn.RemoteAddr().String())
-
-	
 	cliente := &Cliente{
 		Conn:    conn,
 		Nome:    conn.RemoteAddr().String(),
@@ -42,112 +58,95 @@ func (servidor *Servidor) handleConnection(conn net.Conn) {
 		Mailbox: make(chan protocolo.Mensagem, 10),
 	}
 
-	servidor.mutex.Lock()
-	servidor.clientes[conn] = cliente
-	servidor.mutex.Unlock()
+	s.mutex.Lock()
+	s.clientes[conn] = cliente
+	s.mutex.Unlock()
+	fmt.Printf("[SERVIDOR] Nova conexão de %s\n", cliente.Nome)
 
-	go servidor.clienteWriter(cliente)
+	go s.clienteWriter(cliente)
+	s.clienteReader(cliente)
 
-	servidor.clienteReader(cliente)
-
-	servidor.mutex.Lock()
-	delete(servidor.clientes, conn)
-	servidor.mutex.Unlock()
-
+	// --- Limpeza ---
+	s.removerCliente(cliente)
 }
 
-func (servidor *Servidor) clienteReader(cliente *Cliente) {
-
+func (s *Servidor) clienteReader(cliente *Cliente) {
 	decoder := json.NewDecoder(cliente.Conn)
-
 	for {
 		var msg protocolo.Mensagem
 		if err := decoder.Decode(&msg); err != nil {
+			if err == io.EOF { return }
+			fmt.Printf("[SERVIDOR] Erro de leitura de %s: %s\n", cliente.Nome, err)
 			return
 		}
 
+		// A trava global é usada para operações que afetam o estado GERAL do servidor.
+		s.mutex.Lock()
 		switch msg.Comando {
 		case "LOGIN":
 			var dadosLogin protocolo.DadosLogin
-
-			err := json.Unmarshal(msg.Dados, &dadosLogin)
-			if err != nil{
-				fmt.Printf("[SERVIDOR] Erro ao decodificar dados de login: %s\n", err)
-				continue
+			if err := json.Unmarshal(msg.Dados, &dadosLogin); err == nil {
+				cliente.Nome = dadosLogin.Nome
+				fmt.Printf("[SERVIDOR] Cliente %s atualizou nome para '%s'\n", cliente.Conn.RemoteAddr().String(), cliente.Nome)
 			}
-
-			cliente.Nome = dadosLogin.Nome
-			fmt.Printf("Novo login efetuado [JOGADOR: %s]\n", cliente.Nome)
 
 		case "ENTRAR_NA_FILA":
-			fmt.Printf("[SERVIDOR] Cliente '%s' entrou na fila de espera. \n", cliente.Nome)
-			servidor.mutex.Lock()
-			servidor.filaDeEspera = append(servidor.filaDeEspera, cliente)
+			fmt.Printf("[SERVIDOR] Cliente '%s' entrou na fila.\n", cliente.Nome)
+			s.filaDeEspera = append(s.filaDeEspera, cliente)
 
-			if len(servidor.filaDeEspera) >= 2 {
-				jogador1 := servidor.filaDeEspera[0]
-				jogador2 := servidor.filaDeEspera[1]
-				servidor.filaDeEspera = servidor.filaDeEspera[2:]
-
-				salaID := fmt.Sprintf("sala-%d", time.Now().UnixNano())
-				novaSala := &Sala{
-					ID: salaID,
-					Jogadores: []*Cliente{jogador1, jogador2},
-				}
-				servidor.salas[salaID] = novaSala
-
-				jogador1.Sala = novaSala
-				jogador2.Sala = novaSala
-
-				fmt.Printf("[SERVIDOR] Partida encontrada! Sala '%s' criada para '%s' e '%s'", salaID, jogador1, jogador2)
-
-				//Notificar os jogadores
-				dadosP1 := protocolo.DadosPartidaEncontrada{
-					SalaID: salaID,
-					OponenteNome: jogador2.Nome,
-				}
-
-				jsonDadosP1, _ := json.Marshal(dadosP1)
-				msgP1 := protocolo.Mensagem{
-					Comando: "PARTIDA_ENCONTRADA",
-					Dados: jsonDadosP1,
-				}
-				jogador1.Mailbox <- msgP1
-
-				dadosP2 := protocolo.DadosPartidaEncontrada{
-					SalaID: salaID,
-					OponenteNome: jogador1.Nome,
-				}
-				jsonDadosP2,_ := json.Marshal(dadosP2)
-				msgP2 := protocolo.Mensagem{
-					Comando: "PARTIDA_ENCONTRADA",
-					Dados: jsonDadosP2,
-				}
-				jogador2.Mailbox <- msgP2
+			if len(s.filaDeEspera) >= 2 {
+				s.criarSalaComJogadoresDaFila()
 			}
-
-			servidor.mutex.Unlock()
 
 		case "ENVIAR_CHAT":
-
-			var dadosChat protocolo.DadosEnviarChat
-
-			fmt.Printf("[SERVIDOR] Chat de %s: %+v\n", cliente.Nome, string(msg.Dados))
-
-			if err := json.Unmarshal(msg.Dados, &dadosChat); err != nil{
-				fmt.Printf("[SERVIDOR] Erro ao decodificar dados do chat: %s\n", err)
-				continue
+			if cliente.Sala != nil {
+				var dadosChat protocolo.DadosEnviarChat
+				if err := json.Unmarshal(msg.Dados, &dadosChat); err == nil {
+					dados := protocolo.DadosReceberChat{NomeJogador: cliente.Nome, Texto: dadosChat.Texto}
+					jsonDados, _ := json.Marshal(dados)
+					msgParaBroadcast := protocolo.Mensagem{Comando: "RECEBER_CHAT", Dados: jsonDados}
+					
+					// A lógica de broadcast agora é da sala, não mais global.
+					// Não precisamos da trava global aqui, pois a sala tem a sua própria.
+					s.mutex.Unlock() // Liberamos a trava global ANTES de chamar o broadcast da sala.
+					cliente.Sala.broadcast(cliente, msgParaBroadcast)
+					s.mutex.Lock() // Pegamos a trava de volta para o final do loop.
+				}
 			}
-
-			servidor.broadcastChat(cliente, dadosChat.Texto)
-		default:
-			fmt.Printf("[SERVIDOR] Comando desconhecido recebido: %s\n", msg.Comando)
-
 		}
+		s.mutex.Unlock()
 	}
 }
 
-func (servidor *Servidor) clienteWriter(cliente *Cliente) {
+func (s *Servidor) criarSalaComJogadoresDaFila() {
+	// Esta função assume que o mutex global já está travado.
+	jogador1 := s.filaDeEspera[0]
+	jogador2 := s.filaDeEspera[1]
+	s.filaDeEspera = s.filaDeEspera[2:]
+
+	salaID := fmt.Sprintf("sala-%d", time.Now().UnixNano())
+	novaSala := &Sala{
+		ID:        salaID,
+		Jogadores: []*Cliente{jogador1, jogador2},
+	}
+	s.salas[salaID] = novaSala
+	jogador1.Sala = novaSala
+	jogador2.Sala = novaSala
+
+	fmt.Printf("[SERVIDOR] Sala '%s' criada para '%s' e '%s'.\n", salaID, jogador1.Nome, jogador2.Nome)
+
+	dadosP1 := protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: jogador2.Nome}
+	jsonDadosP1, _ := json.Marshal(dadosP1)
+	msgP1 := protocolo.Mensagem{Comando: "PARTIDA_ENCONTRADA", Dados: jsonDadosP1}
+	jogador1.Mailbox <- msgP1
+
+	dadosP2 := protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: jogador1.Nome}
+	jsonDadosP2, _ := json.Marshal(dadosP2)
+	msgP2 := protocolo.Mensagem{Comando: "PARTIDA_ENCONTRADA", Dados: jsonDadosP2}
+	jogador2.Mailbox <- msgP2
+}
+
+func (s *Servidor) clienteWriter(cliente *Cliente) {
 	for msg := range cliente.Mailbox {
 		if err := cliente.Encoder.Encode(msg); err != nil {
 			fmt.Printf("[SERVIDOR] Erro de escrita para %s: %s\n", cliente.Nome, err)
@@ -155,66 +154,26 @@ func (servidor *Servidor) clienteWriter(cliente *Cliente) {
 	}
 }
 
-func (servidor *Servidor) broadcastChat(remetente *Cliente, texto string) {
-	servidor.mutex.Lock()
-	defer servidor.mutex.Unlock() //Para no final der unlock
+func (s *Servidor) removerCliente(cliente *Cliente) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 
-	dados := protocolo.DadosReceberChat{
-		NomeJogador: remetente.Nome,
-		Texto:       texto,
-	}
-
-	jsonDados, err := json.Marshal(dados)
-			if err != nil{
-				fmt.Printf("[SERVIDOR] Erro ao empacotar dados da resposta: %s\n", err)
-				return
-			}
-
-
-	msg := protocolo.Mensagem{
-		Comando: "RECEBER_CHAT",
-		Dados:   jsonDados,
-	}
-
-	jsonParaDebug, _ := json.Marshal(msg)
-	fmt.Printf("[SERVIDOR-DEBUG] Retransmitindo JSON: %s\n", string(jsonParaDebug))
-
-	fmt.Printf("[SERVIDOR] Retransmitindo chat de %s para %d clientes\n", remetente.Nome, len(servidor.clientes)-1)
-
-	for _, cliente := range servidor.clientes {
-		if cliente.Conn != remetente.Conn{
-			cliente.Mailbox <- msg
-		}
-	}
+	delete(s.clientes, cliente.Conn)
+	// Lógica futura: notificar oponente na sala, etc.
 }
 
 func main() {
-	fmt.Println("Executando o código do servidor...")
-
-	endereco := ":65432"
-
-	listener, err := net.Listen("tcp", endereco)
-	if err != nil {
-		fmt.Printf("[SERVIDOR] Erro fatal ao iniciar: %s\n", err)
-		return
-	}
-
 	servidor := &Servidor{
-		clientes: make(map[net.Conn]*Cliente),
-		salas:    make(map[string]*Sala),
+		clientes:     make(map[net.Conn]*Cliente),
+		salas:        make(map[string]*Sala),
 		filaDeEspera: make([]*Cliente, 0),
 	}
-
+	listener, _ := net.Listen("tcp", ":65432")
 	defer listener.Close()
-	fmt.Printf("[SERVIDOR] Servidor ouvindo na porta: %s\n", endereco)
+	fmt.Println("[SERVIDOR] Servidor ouvindo na porta :65432")
 
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			fmt.Printf("[SERVIDOR] Erro ao aceitar nova conexão: %s\n", err)
-			continue
-		}
-
+		conn, _ := listener.Accept()
 		go servidor.handleConnection(conn)
 	}
 }
