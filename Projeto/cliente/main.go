@@ -1,4 +1,3 @@
-// Projeto/cliente/main.go
 package main
 
 import (
@@ -11,6 +10,17 @@ import (
 	"strings"
 )
 
+var meuNome string
+
+func printAjuda() {
+	fmt.Println("\n------------ COMANDOS ---------------")
+	fmt.Println("/buy_pack       - compra 10 cartas (apenas fora da partida)")
+	fmt.Println("/jogar          - no lobby: inicia; em jogo: joga sua próxima carta")
+	fmt.Println("/chat <mensagem> - envia mensagem (mostra [VOCÊ] se for você)")
+	fmt.Println("-------------------------------------")
+	fmt.Print("> ")
+}
+
 func lerServidor(conn net.Conn) {
 	decoder := json.NewDecoder(conn)
 	for {
@@ -21,29 +31,31 @@ func lerServidor(conn net.Conn) {
 		}
 
 		switch msg.Comando {
+
 		case "PARTIDA_ENCONTRADA":
 			var dados protocolo.DadosPartidaEncontrada
 			if err := json.Unmarshal(msg.Dados, &dados); err == nil {
-				fmt.Printf("\r[SISTEMA] Sala encontrada! Conectado com: %s.\n", dados.OponenteNome)
-				fmt.Println("\n------------COMANDOS---------------")
-				fmt.Println("/jogar          - Joga a carta do topo do seu baralho.")
-				fmt.Println("/chat <mensagem> - Envia uma mensagem no chat da sala.")
-				fmt.Println("-----------------------------------")
-				fmt.Print("> ")
+				fmt.Printf("\r[SISTEMA] Sala encontrada! Oponente: %s.\n", dados.OponenteNome)
+				printAjuda()
 			}
 
 		case "ATUALIZACAO_JOGO":
 			var dados protocolo.DadosAtualizacaoJogo
 			if err := json.Unmarshal(msg.Dados, &dados); err == nil {
-				fmt.Println("\n\n--- Status da Rodada ---")
+				fmt.Println("\n--- Status da Rodada ---")
 				fmt.Println(dados.MensagemDoTurno)
 				if len(dados.UltimaJogada) > 0 {
 					fmt.Println("Cartas na mesa:")
 					for nome, carta := range dados.UltimaJogada {
-						fmt.Printf("  - %s jogou: %s\n", nome, carta.Nome)
+						fmt.Printf("  - %s jogou: %s (v=%d)\n", nome, carta.Nome, carta.Valor)
 					}
 				}
-				fmt.Println("Placar:")
+				if dados.VencedorRodada == "EMPATE" {
+					fmt.Println("Resultado da rodada: EMPATE")
+				} else if dados.VencedorRodada != "" {
+					fmt.Printf("Resultado da rodada: VENCEDOR: %s\n", dados.VencedorRodada)
+				}
+				fmt.Println("Cartas restantes:")
 				for nome, contagem := range dados.ContagemCartas {
 					fmt.Printf("  - %s: %d cartas\n", nome, contagem)
 				}
@@ -54,15 +66,40 @@ func lerServidor(conn net.Conn) {
 		case "FIM_DE_JOGO":
 			var dados protocolo.DadosFimDeJogo
 			if err := json.Unmarshal(msg.Dados, &dados); err == nil {
-				fmt.Printf("\r\n--- FIM DE JOGO ---\nO vencedor é %s!\n", dados.VencedorNome)
-				fmt.Println("Obrigado por jogar! A conexão será encerrada.")
-				conn.Close()
+				if dados.VencedorNome == "EMPATE" {
+					fmt.Printf("\n=== FIM DE JOGO — EMPATE ===\n")
+				} else {
+					fmt.Printf("\n=== FIM DE JOGO — VENCEDOR: %s ===\n", dados.VencedorNome)
+				}
+				// volta ao lobby: pode comprar pacotes e reiniciar
+				printAjuda()
+			}
+
+		case "PACOTE_RESULTADO":
+			var r protocolo.ComprarPacoteResp
+			if err := json.Unmarshal(msg.Dados, &r); err == nil {
+				n := make([]string, 0, len(r.Cartas))
+				for _, c := range r.Cartas {
+					n = append(n, fmt.Sprintf("%s(%d,%s)", c.Nome, c.Valor, c.Raridade))
+				}
+				fmt.Printf("\n[Pacote] Você recebeu: %s | estoque=%d\n", strings.Join(n, ", "), r.EstoqueRestante)
+				fmt.Print("> ")
 			}
 
 		case "RECEBER_CHAT":
 			var dadosChat protocolo.DadosReceberChat
 			if err := json.Unmarshal(msg.Dados, &dadosChat); err == nil {
-				fmt.Printf("\r[%s]: %s\n> ", dadosChat.NomeJogador, dadosChat.Texto)
+				prefix := dadosChat.NomeJogador
+				if dadosChat.NomeJogador == meuNome {
+					prefix = "[VOCÊ]"
+				}
+				fmt.Printf("\r%s: %s\n> ", prefix, dadosChat.Texto)
+			}
+
+		case "ERRO":
+			var e protocolo.DadosErro
+			if err := json.Unmarshal(msg.Dados, &e); err == nil {
+				fmt.Printf("\n[ERRO] %s\n> ", e.Mensagem)
 			}
 		}
 	}
@@ -74,67 +111,73 @@ func main() {
 
 	fmt.Print("Digite seu nome de usuário: ")
 	scanner.Scan()
-	nomeJogador := scanner.Text()
+	meuNome = scanner.Text()
+	if strings.TrimSpace(meuNome) == "" {
+		meuNome = "Jogador"
+	}
 
+	// ajuste o host conforme seu cenário (ex.: "127.0.0.1:65432")
 	conn, err := net.Dial("tcp", "servidor:65432")
 	if err != nil {
 		fmt.Printf("Não foi possível conectar: %s\n", err)
 		return
 	}
 	defer conn.Close()
-	fmt.Printf("Conectado como '%s'. Procurando sala...\n", nomeJogador)
+	fmt.Printf("Conectado como '%s'. Aguardando pareamento...\n", meuNome)
 
 	encoder := json.NewEncoder(conn)
 
-	dadosLogin := protocolo.DadosLogin{Nome: nomeJogador}
-	jsonDadosLogin, _ := json.Marshal(dadosLogin)
-	msgLogin := protocolo.Mensagem{Comando: "LOGIN", Dados: jsonDadosLogin}
-	encoder.Encode(msgLogin)
-
-	msgFila := protocolo.Mensagem{Comando: "ENTRAR_NA_FILA", Dados: nil}
-	encoder.Encode(msgFila)
+	// login e fila automática
+	_ = encoder.Encode(protocolo.Mensagem{Comando: "LOGIN", Dados: mustJSON(protocolo.DadosLogin{Nome: meuNome})})
+	_ = encoder.Encode(protocolo.Mensagem{Comando: "ENTRAR_NA_FILA"})
 
 	go lerServidor(conn)
 
-	for scanner.Scan() {
+	// loop de entrada
+	for {
+		fmt.Print("> ")
+		if !scanner.Scan() {
+			return
+		}
 		entrada := scanner.Text()
-		partes := strings.Fields(entrada) // Divide a entrada em palavras
+		partes := strings.Fields(entrada)
 		if len(partes) == 0 {
-			fmt.Print("> ")
 			continue
 		}
-		
-		var msg protocolo.Mensagem
-		comando := partes[0]
 
-		if comando == "/jogar" {
-			msg = protocolo.Mensagem{Comando: "JOGAR_CARTA", Dados: nil}
-		} else if comando == "/chat" {
-			if len(partes) > 1 {
-				textoDoChat := strings.Join(partes[1:], " ")
-				dadosChat := protocolo.DadosEnviarChat{Texto: textoDoChat}
-				jsonDadosChat, _ := json.Marshal(dadosChat)
-				msg = protocolo.Mensagem{Comando: "ENVIAR_CHAT", Dados: jsonDadosChat}
-			} else {
+		switch partes[0] {
+		case "/jogar":
+			_ = encoder.Encode(protocolo.Mensagem{Comando: "JOGAR_CARTA"})
+
+		case "/buy_pack":
+			// compra 1 pacote (= 10 cartas)
+			_ = encoder.Encode(protocolo.Mensagem{
+				Comando: "COMPRAR_PACOTE",
+				Dados:   mustJSON(protocolo.ComprarPacoteReq{Quantidade: 1}),
+			})
+
+		case "/chat":
+			if len(partes) < 2 {
 				fmt.Println("[SISTEMA] Uso: /chat <sua mensagem>")
-				fmt.Print("> ")
 				continue
 			}
-		} else {
-			// Qualquer outra coisa pode ser um atalho para o chat
-			dadosChat := protocolo.DadosEnviarChat{Texto: entrada}
-			jsonDadosChat, _ := json.Marshal(dadosChat)
-			msg = protocolo.Mensagem{Comando: "ENVIAR_CHAT", Dados: jsonDadosChat}
+			txt := strings.TrimSpace(strings.TrimPrefix(entrada, "/chat"))
+			_ = encoder.Encode(protocolo.Mensagem{
+				Comando: "ENVIAR_CHAT",
+				Dados:   mustJSON(protocolo.DadosEnviarChat{Texto: txt}),
+			})
+
+		default:
+			// atalho: qualquer texto envia pro chat
+			_ = encoder.Encode(protocolo.Mensagem{
+				Comando: "ENVIAR_CHAT",
+				Dados:   mustJSON(protocolo.DadosEnviarChat{Texto: entrada}),
+			})
 		}
-		
-		if err := encoder.Encode(msg); err != nil {
-			fmt.Println("Erro ao enviar mensagem:", err)
-		}
-		
-		// Imprime "Você:" para a própria mensagem do jogador
-		if comando != "/jogar" {
-			fmt.Printf("Você: %s\n", msg.Dados) // Mostra o JSON bruto por simplicidade
-		}
-		fmt.Print("> ")
 	}
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
 }
