@@ -10,8 +10,9 @@ type Mensagem struct {
 
 // Carta representa uma única carta do baralho.
 type Carta struct {
-	Nome  string `json:"nome"`  // Ex: "Carta de Poder 8"
-	Valor int    `json:"valor"` // Poder de 1 a 10
+	Naipe  string `json:"naipe"`
+	Valor  int    `json:"valor"` // 2-10, Valete=11, Dama=12, Rei=13, Ás=14
+	Nome   string `json:"nome"`  // Ex: "Ás de Espadas"
 }
 
 // --- STRUCTS DO CLIENTE PARA O SERVIDOR ---
@@ -22,10 +23,6 @@ type DadosLogin struct {
 
 type DadosEnviarChat struct {
 	Texto string `json:"texto"`
-}
-
-type DadosComprarPacote struct {
-	// Não precisa de dados, o comando em si é a ação.
 }
 
 // --- STRUCTS DO SERVIDOR PARA O CLIENTE ---
@@ -40,6 +37,7 @@ type DadosReceberChat struct {
 	Texto       string `json:"texto"`
 }
 
+// DadosAtualizacaoJogo envia o estado completo do jogo para os clientes.
 type DadosAtualizacaoJogo struct {
 	MensagemDoTurno string           `json:"mensagemDoTurno"`
 	ContagemCartas  map[string]int   `json:"contagemCartas"`
@@ -47,15 +45,7 @@ type DadosAtualizacaoJogo struct {
 	VencedorRodada  string           `json:"vencedorRodada"`
 }
 
+// DadosFimDeJogo informa o fim da partida e quem foi o vencedor.
 type DadosFimDeJogo struct {
 	VencedorNome string `json:"vencedorNome"`
-}
-
-type DadosPacoteComprado struct {
-	CartasRecebidas []Carta `json:"cartasRecebidas"`
-	EstoqueRestante int     `json:"estoqueRestante"`
-}
-
-type DadosErro struct {
-	Mensagem string `json:"mensagem"`
 }

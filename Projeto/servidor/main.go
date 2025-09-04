@@ -33,21 +33,38 @@ type Sala struct {
 }
 
 type Servidor struct {
-	clientes         map[net.Conn]*Cliente
-	salas            map[string]*Sala
-	filaDeEspera     []*Cliente
-	estoqueDePacotes int // Estoque global de pacotes de cartas.
-	mutex            sync.Mutex
+	clientes     map[net.Conn]*Cliente
+	salas        map[string]*Sala
+	filaDeEspera []*Cliente
+	mutex        sync.Mutex
 }
 
 // --- Métodos da Sala (Lógica do Jogo) ---
 
+
+// broadcast agora é um MÉTODO da Sala e é seguro.
+func (sala *Sala) broadcast(remetente *Cliente, msg protocolo.Mensagem) {
+	sala.mutex.Lock()
+	defer sala.mutex.Unlock()
+
+	for _, jogador := range sala.Jogadores {
+		if jogador != remetente {
+			select {
+			case jogador.Mailbox <- msg:
+			default:
+				fmt.Printf("[SALA %s] Mailbox do jogador %s cheia. Mensagem descartada.\n", sala.ID, jogador.Nome)
+			}
+		}
+	}
+}
 func (sala *Sala) notificarTodos(msg protocolo.Mensagem) {
+	// Esta função não precisa de trava própria, pois será chamada por
+	// funções que já detêm a trava da sala.
 	for _, jogador := range sala.Jogadores {
 		select {
 		case jogador.Mailbox <- msg:
 		default:
-			fmt.Printf("[SALA %s] Mailbox do jogador %s cheia.\n", sala.ID, jogador.Nome)
+			fmt.Printf("[SALA %s] Mailbox do jogador %s cheia. Mensagem descartada.\n", sala.ID, jogador.Nome)
 		}
 	}
 }
@@ -56,37 +73,40 @@ func (sala *Sala) iniciarPartida() {
 	sala.mutex.Lock()
 	defer sala.mutex.Unlock()
 
-	baralho := criarBaralho(20, 10) // 20 cartas, poder de 1 a 10
+	baralho := criarBaralho()
 	rand.New(rand.NewSource(time.Now().UnixNano())).Shuffle(len(baralho), func(i, j int) {
 		baralho[i], baralho[j] = baralho[j], baralho[i]
 	})
 
 	p1 := sala.Jogadores[0]
 	p2 := sala.Jogadores[1]
-	sala.Baralhos[p1.Nome] = baralho[:10]
-	sala.Baralhos[p2.Nome] = baralho[10:]
+	sala.Baralhos[p1.Nome] = baralho[:26]
+	sala.Baralhos[p2.Nome] = baralho[26:]
 	sala.EstadoDoJogo = "JOGANDO"
 
 	fmt.Printf("[SALA %s] Partida iniciada. %s (%d cartas) vs %s (%d cartas)\n", sala.ID, p1.Nome, len(sala.Baralhos[p1.Nome]), p2.Nome, len(sala.Baralhos[p2.Nome]))
-	sala.enviarAtualizacaoJogo("Partida iniciada! Digite /jogar.", "")
+	sala.enviarAtualizacaoJogo("Partida iniciada! É a vez de todos jogarem.", "")
 }
 
 func (sala *Sala) processarJogada(jogador *Cliente) {
 	sala.mutex.Lock()
 	defer sala.mutex.Unlock()
 
+	// Verifica se o jogador já jogou nesta rodada
 	if _, jaJogou := sala.CartasNaMesa[jogador.Nome]; jaJogou {
-		return
+		return // Ignora a jogada se ele já jogou
 	}
 	if len(sala.Baralhos[jogador.Nome]) == 0 {
-		return
+		return // Jogador não tem mais cartas
 	}
 
 	cartaJogada := sala.Baralhos[jogador.Nome][0]
 	sala.Baralhos[jogador.Nome] = sala.Baralhos[jogador.Nome][1:]
 	sala.CartasNaMesa[jogador.Nome] = cartaJogada
-	fmt.Printf("[SALA %s] Jogador %s jogou: %s\n", sala.ID, jogador.Nome, cartaJogada.Nome)
 
+	fmt.Printf("[SALA %s] Jogador %s jogou %s\n", sala.ID, jogador.Nome, cartaJogada.Nome)
+
+	// Se ambos jogaram, resolve a rodada
 	if len(sala.CartasNaMesa) == 2 {
 		p1 := sala.Jogadores[0]
 		p2 := sala.Jogadores[1]
@@ -101,19 +121,21 @@ func (sala *Sala) processarJogada(jogador *Cliente) {
 			sala.Baralhos[p2.Nome] = append(sala.Baralhos[p2.Nome], cartaP1, cartaP2)
 			vencedorRodada = p2.Nome
 		} else {
-			vencedorRodada = "EMPATE"
+			vencedorRodada = "EMPATE" // Cartas são descartadas
 		}
 
 		fmt.Printf("[SALA %s] Fim da rodada. Vencedor: %s. Placar: %s %d / %s %d\n", sala.ID, vencedorRodada, p1.Nome, len(sala.Baralhos[p1.Nome]), p2.Nome, len(sala.Baralhos[p2.Nome]))
+		
 		mensagemTurno := fmt.Sprintf("Rodada finalizada! Vencedor: %s. Joguem novamente!", vencedorRodada)
-
+		
+		// Verifica condição de vitória
 		if len(sala.Baralhos[p1.Nome]) == 0 {
 			sala.finalizarPartida(p2)
 		} else if len(sala.Baralhos[p2.Nome]) == 0 {
 			sala.finalizarPartida(p1)
 		} else {
 			sala.enviarAtualizacaoJogo(mensagemTurno, vencedorRodada)
-			sala.CartasNaMesa = make(map[string]Carta)
+			sala.CartasNaMesa = make(map[string]Carta) // Limpa a mesa para a próxima rodada
 		}
 	} else {
 		sala.enviarAtualizacaoJogo("Aguardando oponente jogar...", "")
@@ -197,21 +219,17 @@ func (s *Servidor) clienteReader(cliente *Cliente) {
 				cliente.Sala.processarJogada(cliente)
 				s.mutex.Lock()
 			}
-		case "COMPRAR_PACOTE":
-			if s.estoqueDePacotes > 0 {
-				s.estoqueDePacotes--
-				pacote := criarBaralho(5, 10) // Pacote com 5 cartas aleatórias
-				dados := protocolo.DadosPacoteComprado{CartasRecebidas: pacote, EstoqueRestante: s.estoqueDePacotes}
-				jsonDados, _ := json.Marshal(dados)
-				resposta := protocolo.Mensagem{Comando: "PACOTE_COMPRADO", Dados: jsonDados}
-				cliente.Mailbox <- resposta
-				fmt.Printf("[SERVIDOR] Cliente '%s' comprou um pacote. Estoque restante: %d\n", cliente.Nome, s.estoqueDePacotes)
-			} else {
-				dados := protocolo.DadosErro{Mensagem: "Estoque de pacotes esgotado!"}
-				jsonDados, _ := json.Marshal(dados)
-				resposta := protocolo.Mensagem{Comando: "ERRO", Dados: jsonDados}
-				cliente.Mailbox <- resposta
-				fmt.Printf("[SERVIDOR] Cliente '%s' tentou comprar, mas estoque está esgotado.\n", cliente.Nome)
+		case "ENVIAR_CHAT":
+			if cliente.Sala != nil {
+				var dadosChat protocolo.DadosEnviarChat
+				if err := json.Unmarshal(msg.Dados, &dadosChat); err == nil {
+					dados := protocolo.DadosReceberChat{NomeJogador: cliente.Nome, Texto: dadosChat.Texto}
+					jsonDados, _ := json.Marshal(dados)
+					msgParaBroadcast := protocolo.Mensagem{Comando: "RECEBER_CHAT", Dados: jsonDados}
+					s.mutex.Unlock()
+					cliente.Sala.broadcast(cliente, msgParaBroadcast)
+					s.mutex.Lock()
+				}
 			}
 		}
 		s.mutex.Unlock()
@@ -259,39 +277,44 @@ func (s *Servidor) clienteWriter(cliente *Cliente) {
 
 func (s *Servidor) adicionarCliente(cliente *Cliente) {
 	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	s.clientes[cliente.Conn] = cliente
-	s.mutex.Unlock()
 }
 
 func (s *Servidor) removerCliente(cliente *Cliente) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+
 	// Lógica futura: notificar oponente na sala, remover da fila, etc.
 	delete(s.clientes, cliente.Conn)
 }
 
-func criarBaralho(numCartas int, maxPoder int) []Carta {
+func criarBaralho() []Carta {
+	naipes := []string{"Copas", "Ouros", "Paus", "Espadas"}
+	nomes := map[int]string{11: "Valete", 12: "Dama", 13: "Rei", 14: "Ás"}
 	var baralho []Carta
-	for i := 0; i < numCartas; i++ {
-		valor := rand.Intn(maxPoder) + 1
-		baralho = append(baralho, Carta{
-			Nome:  fmt.Sprintf("Carta de Poder %d", valor),
-			Valor: valor,
-		})
+
+	for _, naipe := range naipes {
+		for valor := 2; valor <= 14; valor++ {
+			nome := fmt.Sprintf("%d de %s", valor, naipe)
+			if v, ok := nomes[valor]; ok {
+				nome = fmt.Sprintf("%s de %s", v, naipe)
+			}
+			baralho = append(baralho, Carta{Naipe: naipe, Valor: valor, Nome: nome})
+		}
 	}
 	return baralho
 }
 
 func main() {
 	servidor := &Servidor{
-		clientes:         make(map[net.Conn]*Cliente),
-		salas:            make(map[string]*Sala),
-		filaDeEspera:     make([]*Cliente, 0),
-		estoqueDePacotes: 10, // Inicia o servidor com 10 pacotes no estoque.
+		clientes:     make(map[net.Conn]*Cliente),
+		salas:        make(map[string]*Sala),
+		filaDeEspera: make([]*Cliente, 0),
 	}
 	listener, _ := net.Listen("tcp", ":65432")
 	defer listener.Close()
-	fmt.Printf("[SERVIDOR] Servidor de Jogo ouvindo na porta :65432 (Estoque de Pacotes: %d)\n", servidor.estoqueDePacotes)
+	fmt.Println("[SERVIDOR] Servidor de Jogo ouvindo na porta :65432")
 
 	for {
 		conn, _ := listener.Accept()
