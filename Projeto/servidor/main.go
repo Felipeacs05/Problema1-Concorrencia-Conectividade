@@ -16,22 +16,22 @@ import (
 type Carta = protocolo.Carta
 
 type Cliente struct {
-	Conn      net.Conn
-	Nome      string
-	Encoder   *json.Encoder
-	Mailbox   chan protocolo.Mensagem
-	Sala      *Sala
+	Conn       net.Conn
+	Nome       string
+	Encoder    *json.Encoder
+	Mailbox    chan protocolo.Mensagem
+	Sala       *Sala
 	Inventario []Carta // coleção do jogador (cresce com /buy_pack)
 }
 
 type Sala struct {
 	ID           string
 	Jogadores    []*Cliente
-	Estado       string // "LOBBY" | "JOGANDO" | "FINALIZADO"
-	Baralhos     map[string][]Carta     // nome -> deck da partida (10)
-	CartasNaMesa map[string]Carta       // nome -> carta jogada na rodada
-	Pontos       map[string]int         // placar
-	Prontos      map[string]bool        // lobby: quem já pediu /jogar
+	Estado       string             // "LOBBY" | "JOGANDO" | "FINALIZADO"
+	Baralhos     map[string][]Carta // nome -> deck da partida (10)
+	CartasNaMesa map[string]Carta   // nome -> carta jogada na rodada
+	Pontos       map[string]int     // placar
+	Prontos      map[string]bool    // lobby: quem já pediu /jogar
 	mutex        sync.Mutex
 }
 
@@ -44,7 +44,7 @@ type Servidor struct {
 	// ==== Estoque global de pacotes (actor) ====
 	packReqs chan packReq
 	estoque  map[string][]Carta // raridade -> cartas disponíveis (IDs únicos)
-	packSize int                 // 10 cartas por /buy_pack
+	packSize int                // 10 cartas por /buy_pack
 }
 
 type packReq struct {
@@ -158,10 +158,10 @@ func (s *Servidor) takeOneByRarityWithDowngrade(r string) (Carta, bool) {
 func (s *Servidor) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	cliente := &Cliente{
-		Conn:      conn,
-		Nome:      conn.RemoteAddr().String(),
-		Encoder:   json.NewEncoder(conn),
-		Mailbox:   make(chan protocolo.Mensagem, 32),
+		Conn:       conn,
+		Nome:       conn.RemoteAddr().String(),
+		Encoder:    json.NewEncoder(conn),
+		Mailbox:    make(chan protocolo.Mensagem, 32),
 		Inventario: make([]Carta, 0, 64),
 	}
 	s.adicionarCliente(cliente)
@@ -204,18 +204,17 @@ func (s *Servidor) clienteReader(cliente *Cliente) {
 			s.entrarFila(cliente)
 
 		case "JOGAR_CARTA":
-    if cliente.Sala == nil {
-        break
-    }
-    switch cliente.Sala.Estado {
-    case "LOBBY", "FINALIZADO":
-        // no lobby (ou após o fim), /jogar marca o jogador como "pronto".
-        cliente.Sala.marcarProntoEIniciarSePossivel(cliente)
-    case "JOGANDO":
-        // durante a partida, /jogar revela a próxima carta do topo.
-        cliente.Sala.processarJogada(cliente)
-    }
-
+			if cliente.Sala == nil {
+				break
+			}
+			switch cliente.Sala.Estado {
+			case "LOBBY", "FINALIZADO":
+				// no lobby (ou após o fim), /jogar marca o jogador como "pronto".
+				cliente.Sala.marcarProntoEIniciarSePossivel(cliente)
+			case "JOGANDO":
+				// durante a partida, /jogar revela a próxima carta do topo.
+				cliente.Sala.processarJogada(cliente)
+			}
 
 		case "COMPRAR_PACOTE":
 			// Permitido somente fora da partida (LOBBY/FINALIZADO)
@@ -288,37 +287,34 @@ func (s *Servidor) criarSalaComJogadoresDaFila() {
 /* ====================== Sala: lobby e jogo ====================== */
 
 func (sala *Sala) marcarProntoEIniciarSePossivel(cli *Cliente) {
-    // Marca o jogador como pronto no lobby. Quando os dois estiverem prontos, inicia a partida.
-    sala.mutex.Lock()
+	sala.mutex.Lock()
 
-    // Se a sala estava finalizada, resetamos para lobby (para poder recomeçar)
-    if sala.Estado == "FINALIZADO" {
-        sala.Estado = "LOBBY"
-        sala.Baralhos = make(map[string][]Carta)
-        sala.CartasNaMesa = make(map[string]Carta)
-        sala.Pontos = make(map[string]int)
-        sala.Prontos = make(map[string]bool)
-    }
-    if sala.Prontos == nil {
-        sala.Prontos = make(map[string]bool)
-    }
+	// Se estava finalizada, volta ao lobby “limpa”
+	if sala.Estado == "FINALIZADO" {
+		sala.Estado = "LOBBY"
+		sala.Baralhos = make(map[string][]Carta)
+		sala.CartasNaMesa = make(map[string]Carta)
+		sala.Pontos = make(map[string]int)
+		sala.Prontos = make(map[string]bool)
+	}
+	if sala.Prontos == nil {
+		sala.Prontos = make(map[string]bool)
+	}
 
-    sala.Prontos[cli.Nome] = true
-    ready1 := sala.Prontos[sala.Jogadores[0].Nome]
-    ready2 := sala.Prontos[sala.Jogadores[1].Nome]
+	sala.Prontos[cli.Nome] = true
+	ready1 := sala.Prontos[sala.Jogadores[0].Nome]
+	ready2 := sala.Prontos[sala.Jogadores[1].Nome]
 
-    sala.mutex.Unlock()
+	sala.mutex.Unlock()
 
-    if ready1 && ready2 {
-        // ambos prontos → inicia a partida
-        sala.iniciarPartida()
-    } else {
-        // avisa que um já está pronto e aguarda o outro
-        sala.enviarAtualizacaoJogo(
-            fmt.Sprintf("%s está pronto. Aguardando oponente usar /jogar.", cli.Nome),
-            "",
-        )
-    }
+	if ready1 && ready2 {
+		sala.iniciarPartida()
+	} else {
+		sala.enviarAtualizacaoJogo(
+			fmt.Sprintf("%s está pronto. Aguardando oponente usar /jogar.", cli.Nome),
+			"",
+		)
+	}
 }
 
 /* ====================== Sala: métodos de broadcast e jogo ====================== */
@@ -336,97 +332,135 @@ func (sala *Sala) broadcast(_ *Cliente, msg protocolo.Mensagem) {
 }
 
 func (sala *Sala) enviarAtualizacaoJogo(mensagem, vencedorRodada string) {
-	contagem := map[string]int{}
-	ultima := map[string]Carta{}
-	for _, p := range sala.Jogadores {
-		contagem[p.Nome] = len(sala.Baralhos[p.Nome])
-		if c, ok := sala.CartasNaMesa[p.Nome]; ok {
-			ultima[p.Nome] = c
-		}
-	}
-	dados := protocolo.DadosAtualizacaoJogo{
-		MensagemDoTurno: mensagem,
-		ContagemCartas:  contagem,
-		UltimaJogada:    ultima,
-		VencedorRodada:  vencedorRodada,
-	}
-	sala.broadcast(nil, protocolo.Mensagem{Comando: "ATUALIZACAO_JOGO", Dados: mustJSON(dados)})
+    sala.mutex.Lock()
+    dados := sala.snapshotUpdate(mensagem, vencedorRodada)
+    sala.mutex.Unlock()
+
+    sala.broadcast(nil, protocolo.Mensagem{
+        Comando: "ATUALIZACAO_JOGO",
+        Dados:   mustJSON(dados),
+    })
 }
+
 
 /* ====================== Jogo ====================== */
 
 // iniciarPartida monta 10 cartas por jogador a partir do INVENTÁRIO.
 func (sala *Sala) iniciarPartida() {
+	sala.mutex.Lock()
 	sala.Baralhos = make(map[string][]Carta)
 	sala.CartasNaMesa = make(map[string]Carta)
 	sala.Pontos = make(map[string]int)
+	// monta 10 cartas por jogador a partir do inventário
 	for _, p := range sala.Jogadores {
 		sala.Baralhos[p.Nome] = montarBaralhoDe10(p.Inventario)
 		sala.Pontos[p.Nome] = 0
 	}
 	sala.Estado = "JOGANDO"
+	// zera marcadores de pronto
+	sala.Prontos = make(map[string]bool)
+	sala.mutex.Unlock()
+
 	sala.enviarAtualizacaoJogo("Partida iniciada! Use /jogar para revelar suas cartas.", "")
-	fmt.Printf("[SALA %s] partida iniciada (%s vs %s)\n", sala.ID, sala.Jogadores[0].Nome, sala.Jogadores[1].Nome)
 }
 
+func (sala *Sala) snapshotUpdate(mensagem, vencedor string) protocolo.DadosAtualizacaoJogo {
+    contagem := make(map[string]int, len(sala.Jogadores))
+    ultima := make(map[string]Carta)
+    for _, p := range sala.Jogadores {
+        contagem[p.Nome] = len(sala.Baralhos[p.Nome])
+        if c, ok := sala.CartasNaMesa[p.Nome]; ok {
+            ultima[p.Nome] = c
+        }
+    }
+    return protocolo.DadosAtualizacaoJogo{
+        MensagemDoTurno: mensagem,
+        ContagemCartas:  contagem,
+        UltimaJogada:    ultima,
+        VencedorRodada:  vencedor,
+    }
+}
+
+
 func (sala *Sala) processarJogada(jogador *Cliente) {
-	sala.mutex.Lock()
-	defer sala.mutex.Unlock()
+    sala.mutex.Lock()
 
-	if sala.Estado != "JOGANDO" {
-		return
-	}
-	// já jogou nesta rodada?
-	if _, ok := sala.CartasNaMesa[jogador.Nome]; ok {
-		return
-	}
-	deck := sala.Baralhos[jogador.Nome]
-	if len(deck) == 0 {
-		return
-	}
-	carta := deck[0]
-	sala.Baralhos[jogador.Nome] = deck[1:]
-	sala.CartasNaMesa[jogador.Nome] = carta
+    if sala.Estado != "JOGANDO" {
+        sala.mutex.Unlock()
+        return
+    }
 
-	// se os dois já jogaram, resolve a rodada
-	if len(sala.CartasNaMesa) == 2 {
-		p1 := sala.Jogadores[0]
-		p2 := sala.Jogadores[1]
-		c1 := sala.CartasNaMesa[p1.Nome]
-		c2 := sala.CartasNaMesa[p2.Nome]
-		venc := "EMPATE"
-		if c1.Valor > c2.Valor {
-			venc = p1.Nome
-			sala.Pontos[p1.Nome]++
-		} else if c2.Valor > c1.Valor {
-			venc = p2.Nome
-			sala.Pontos[p2.Nome]++
-		}
+    // já jogou nesta rodada?
+    if _, ok := sala.CartasNaMesa[jogador.Nome]; ok {
+        dados := sala.snapshotUpdate("Você já jogou nesta rodada. Aguarde o oponente.", "")
+        sala.mutex.Unlock()
+        sala.broadcast(nil, protocolo.Mensagem{Comando: "ATUALIZACAO_JOGO", Dados: mustJSON(dados)})
+        return
+    }
 
-		sala.enviarAtualizacaoJogo("Rodada finalizada!", venc)
-		sala.CartasNaMesa = make(map[string]Carta)
+    deck := sala.Baralhos[jogador.Nome]
+    if len(deck) == 0 {
+        dados := sala.snapshotUpdate("Seu baralho acabou. Aguarde terminar.", "")
+        sala.mutex.Unlock()
+        sala.broadcast(nil, protocolo.Mensagem{Comando: "ATUALIZACAO_JOGO", Dados: mustJSON(dados)})
+        return
+    }
 
-		// fim da partida: ambos decks chegaram a 0 após n rodadas (10)
-		if len(sala.Baralhos[p1.Nome]) == 0 && len(sala.Baralhos[p2.Nome]) == 0 {
-			vencedor := "EMPATE"
-			if sala.Pontos[p1.Nome] > sala.Pontos[p2.Nome] {
-				vencedor = p1.Nome
-			} else if sala.Pontos[p2.Nome] > sala.Pontos[p1.Nome] {
-				vencedor = p2.Nome
-			}
-			sala.Estado = "FINALIZADO"
-			sala.broadcast(nil, protocolo.Mensagem{
-				Comando: "FIM_DE_JOGO",
-				Dados:   mustJSON(protocolo.DadosFimDeJogo{VencedorNome: vencedor}),
-			})
-			// volta para o lobby: comprar pacotes e reiniciar quando quiser
-		} else {
-			// próxima rodada
-			sala.enviarAtualizacaoJogo("Nova rodada: use /jogar.", "")
-		}
-	} else {
-		sala.enviarAtualizacaoJogo("Aguardando o oponente...", "")
-	}
+    // joga carta do topo
+    carta := deck[0]
+    sala.Baralhos[jogador.Nome] = deck[1:]
+    sala.CartasNaMesa[jogador.Nome] = carta
+
+    // se os dois já jogaram, resolve a rodada
+    if len(sala.CartasNaMesa) == 2 {
+        p1 := sala.Jogadores[0]
+        p2 := sala.Jogadores[1]
+        c1 := sala.CartasNaMesa[p1.Nome]
+        c2 := sala.CartasNaMesa[p2.Nome]
+
+        vencedor := "EMPATE"
+        if c1.Valor > c2.Valor {
+            vencedor = p1.Nome
+            sala.Pontos[p1.Nome]++
+        } else if c2.Valor > c1.Valor {
+            vencedor = p2.Nome
+            sala.Pontos[p2.Nome]++
+        }
+
+        dadosRes := sala.snapshotUpdate("Rodada finalizada!", vencedor)
+        // limpa mesa para a próxima rodada
+        sala.CartasNaMesa = make(map[string]Carta)
+
+        // fim da partida quando ambos decks zerarem
+        fim := len(sala.Baralhos[p1.Nome]) == 0 && len(sala.Baralhos[p2.Nome]) == 0
+
+        if fim {
+            vencedorFinal := "EMPATE"
+            if sala.Pontos[p1.Nome] > sala.Pontos[p2.Nome] {
+                vencedorFinal = p1.Nome
+            } else if sala.Pontos[p2.Nome] > sala.Pontos[p1.Nome] {
+                vencedorFinal = p2.Nome
+            }
+            sala.Estado = "FINALIZADO"
+            fimMsg := protocolo.Mensagem{Comando: "FIM_DE_JOGO", Dados: mustJSON(protocolo.DadosFimDeJogo{VencedorNome: vencedorFinal})}
+
+            sala.mutex.Unlock()
+            sala.broadcast(nil, protocolo.Mensagem{Comando: "ATUALIZACAO_JOGO", Dados: mustJSON(dadosRes)})
+            sala.broadcast(nil, fimMsg)
+            return
+        }
+
+        dadosNext := sala.snapshotUpdate("Nova rodada: use /jogar.", "")
+        sala.mutex.Unlock()
+        sala.broadcast(nil, protocolo.Mensagem{Comando: "ATUALIZACAO_JOGO", Dados: mustJSON(dadosRes)})
+        sala.broadcast(nil, protocolo.Mensagem{Comando: "ATUALIZACAO_JOGO", Dados: mustJSON(dadosNext)})
+        return
+    }
+
+    // apenas um jogou: avisa e mostra carta na mesa
+    dados := sala.snapshotUpdate("Aguardando o oponente...", "")
+    sala.mutex.Unlock()
+    sala.broadcast(nil, protocolo.Mensagem{Comando: "ATUALIZACAO_JOGO", Dados: mustJSON(dados)})
 }
 
 /* ====================== Utilidades ====================== */
