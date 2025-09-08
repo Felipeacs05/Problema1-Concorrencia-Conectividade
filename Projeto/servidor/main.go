@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"meujogo/protocolo"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -22,19 +23,21 @@ type Cliente struct {
 	Encoder    *json.Encoder
 	Mailbox    chan protocolo.Mensagem
 	Sala       *Sala
-	Inventario []Carta // coleção do jogador (cresce com /buy_pack)
+	Inventario []Carta // cartas do jogador na rodada atual
+	CartasJSON string  // arquivo JSON com as cartas do jogador
 }
 
 type Sala struct {
 	ID              string
 	Jogadores       []*Cliente
-	Estado          string           // "LOBBY" | "JOGANDO" | "FINALIZADO"
+	Estado          string           // "AGUARDANDO_COMPRA" | "JOGANDO" | "FINALIZADO"
 	CartasNaMesa    map[string]Carta // nome -> carta jogada na jogada atual
 	PontosRodada    map[string]int   // nome -> pontos na rodada atual
 	PontosPartida   map[string]int   // nome -> rodadas ganhas
 	NumeroRodada    int              // 1, 2, 3
 	JogadasNaRodada int              // 0, 1, 2 (quantas jogadas já foram feitas na rodada)
-	Prontos         map[string]bool  // lobby: quem já pediu /jogar
+	Prontos         map[string]bool  // quem já comprou /buy_pack nesta partida
+	srv             *Servidor
 	mutex           sync.Mutex
 }
 
@@ -115,8 +118,14 @@ func (s *Servidor) loopPacotes() {
 			continue
 		}
 
-		// Entrega atômica para o jogador
-		req.cli.Inventario = append(req.cli.Inventario, cartas...)
+		// Carrega cartas existentes do JSON
+		cartasExistentes := carregarCartasJSON(req.cli)
+		// Adiciona novas cartas
+		cartasExistentes = append(cartasExistentes, cartas...)
+		// Salva todas as cartas no JSON
+		salvarCartasJSON(req.cli, cartasExistentes)
+		// Atualiza inventário em memória
+		req.cli.Inventario = cartasExistentes
 
 		// Computa estoque restante
 		rest := 0
@@ -128,6 +137,12 @@ func (s *Servidor) loopPacotes() {
 			Comando: "PACOTE_RESULTADO",
 			Dados:   mustJSON(protocolo.ComprarPacoteResp{Cartas: cartas, EstoqueRestante: rest}),
 		})
+
+		// Mostra cartas detalhadas após compra e marca como pronto
+		mostrarCartasDetalhadas(req.cli)
+		if req.cli.Sala != nil {
+			req.cli.Sala.marcarCompraEIniciarSePossivel(req.cli)
+		}
 	}
 }
 
@@ -200,33 +215,40 @@ func (s *Servidor) clienteReader(cliente *Cliente) {
 			var dadosLogin protocolo.DadosLogin
 			if err := json.Unmarshal(msg.Dados, &dadosLogin); err == nil && dadosLogin.Nome != "" {
 				cliente.Nome = dadosLogin.Nome
+				cliente.CartasJSON = fmt.Sprintf("cartas_%s.json", cliente.Nome)
 				fmt.Printf("[SERVIDOR] %s fez login como '%s'\n", cliente.Conn.RemoteAddr().String(), cliente.Nome)
 			}
 
 		case "ENTRAR_NA_FILA":
 			s.entrarFila(cliente)
 
+		case "PRONTO":
+			// Ignorado no novo fluxo; mantido por compatibilidade
+
+		case "BUY_CARTA":
+			// Mostra cartas detalhadas
+			mostrarCartasDetalhadas(cliente)
+
 		case "JOGAR_CARTA":
 			if cliente.Sala == nil {
 				break
 			}
-			switch cliente.Sala.Estado {
-			case "LOBBY", "FINALIZADO":
-				// no lobby (ou após o fim), /jogar marca o jogador como "pronto".
-				cliente.Sala.marcarProntoEIniciarSePossivel(cliente)
-			case "JOGANDO":
+			if cliente.Sala.Estado == "JOGANDO" {
 				// durante a partida, /jogar com seleção de carta
 				var dadosJogar protocolo.DadosJogarCarta
 				json.Unmarshal(msg.Dados, &dadosJogar)
 				cliente.Sala.processarJogada(cliente, dadosJogar.CartaID)
 			}
+			if cliente.Sala.Estado == "AGUARDANDO_COMPRA" {
+				cliente.Sala.enviarAtualizacaoJogo("Ambos devem comprar com /buy_pack antes de jogar.", "", "")
+			}
 
 		case "COMPRAR_PACOTE":
-			// Permitido somente fora da partida (LOBBY/FINALIZADO)
+			// Permitido somente fora da partida
 			if cliente.Sala != nil && cliente.Sala.Estado == "JOGANDO" {
 				s.enviar(cliente, protocolo.Mensagem{
 					Comando: "ERRO",
-					Dados:   mustJSON(protocolo.DadosErro{Mensagem: "Você só pode comprar pacotes fora da partida."}),
+					Dados:   mustJSON(protocolo.DadosErro{Mensagem: "Você só pode comprar cartas fora da partida."}),
 				})
 				break
 			}
@@ -271,69 +293,65 @@ func (s *Servidor) criarSalaComJogadoresDaFila() {
 	novaSala := &Sala{
 		ID:              salaID,
 		Jogadores:       []*Cliente{j1, j2},
-		Estado:          "LOBBY",
+		Estado:          "AGUARDANDO_COMPRA",
 		CartasNaMesa:    make(map[string]Carta),
 		PontosRodada:    make(map[string]int),
 		PontosPartida:   make(map[string]int),
 		NumeroRodada:    1,
 		JogadasNaRodada: 0,
 		Prontos:         make(map[string]bool),
+		srv:             s,
 	}
+	// Carrega cartas existentes do JSON para cada jogador
+	j1.Inventario = carregarCartasJSON(j1)
+	j2.Inventario = carregarCartasJSON(j2)
 	s.salas[salaID] = novaSala
 	j1.Sala, j2.Sala = novaSala, novaSala
 
 	fmt.Printf("[SERVIDOR] Sala '%s' criada: %s vs %s (LOBBY)\n", salaID, j1.Nome, j2.Nome)
 
-	// Notifica os dois + mostra comandos (cliente imprime)
+	// Notifica os dois sobre a sala criada
 	d1 := protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: j2.Nome}
 	d2 := protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: j1.Nome}
 	s.enviar(j1, protocolo.Mensagem{Comando: "PARTIDA_ENCONTRADA", Dados: mustJSON(d1)})
 	s.enviar(j2, protocolo.Mensagem{Comando: "PARTIDA_ENCONTRADA", Dados: mustJSON(d2)})
+
+	// Informar que devem comprar pack para iniciar
+	novaSala.broadcast(nil, protocolo.Mensagem{
+		Comando: "SISTEMA",
+		Dados:   mustJSON(protocolo.DadosErro{Mensagem: "[SISTEMA] Ambos jogadores devem digitar /buy_pack. Quando ambos comprarem, a partida inicia."}),
+	})
 }
 
 /* ====================== Sala: lobby e jogo ====================== */
 
-func (sala *Sala) marcarProntoEIniciarSePossivel(cli *Cliente) {
+// marcarCompraEIniciarSePossivel marca o jogador que comprou e verifica se pode iniciar a partida
+func (sala *Sala) marcarCompraEIniciarSePossivel(cli *Cliente) {
 	sala.mutex.Lock()
 
-	// Se estava finalizada, volta ao lobby "limpa"
+	// Se estava finalizada, reinicia tudo
 	if sala.Estado == "FINALIZADO" {
-		sala.Estado = "LOBBY"
-		sala.CartasNaMesa = make(map[string]Carta)
-		sala.PontosRodada = make(map[string]int)
-		sala.PontosPartida = make(map[string]int)
-		sala.NumeroRodada = 1
-		sala.JogadasNaRodada = 0
-		sala.Prontos = make(map[string]bool)
+		sala.reiniciarSala()
 	}
 	if sala.Prontos == nil {
 		sala.Prontos = make(map[string]bool)
 	}
 
+	// Marca como "comprou"
 	sala.Prontos[cli.Nome] = true
 	ready1 := sala.Prontos[sala.Jogadores[0].Nome]
 	ready2 := sala.Prontos[sala.Jogadores[1].Nome]
 
-	// Verifica se ambos jogadores têm cartas no inventário
-	temCartas1 := len(sala.Jogadores[0].Inventario) > 0
-	temCartas2 := len(sala.Jogadores[1].Inventario) > 0
-
 	sala.mutex.Unlock()
 
+	// Broadcast de pronto
+	sala.broadcast(nil, protocolo.Mensagem{
+		Comando: "SISTEMA",
+		Dados:   mustJSON(protocolo.DadosErro{Mensagem: fmt.Sprintf("[SISTEMA] - Jogador \"%s\" está pronto para iniciar", cli.Nome)}),
+	})
+
 	if ready1 && ready2 {
-		if temCartas1 && temCartas2 {
-			sala.iniciarPartida()
-		} else {
-			sala.enviarAtualizacaoJogo(
-				"Ambos jogadores precisam comprar cartas antes de iniciar a partida! Use /buy_pack",
-				"", "",
-			)
-		}
-	} else {
-		sala.enviarAtualizacaoJogo(
-			fmt.Sprintf("%s está pronto. Aguardando oponente usar /jogar.", cli.Nome),
-			"", "",
-		)
+		sala.iniciarPartida()
 	}
 }
 
@@ -353,7 +371,7 @@ func (sala *Sala) broadcast(_ *Cliente, msg protocolo.Mensagem) {
 
 func (sala *Sala) enviarAtualizacaoJogo(mensagem, vencedorJogada, vencedorRodada string) {
 	sala.mutex.Lock()
-	dados := sala.snapshotUpdate(mensagem, vencedorJogada, vencedorRodada)
+	dados := sala.criarAtualizacaoJogo(mensagem, vencedorJogada, vencedorRodada)
 	sala.mutex.Unlock()
 
 	sala.broadcast(nil, protocolo.Mensagem{
@@ -364,29 +382,33 @@ func (sala *Sala) enviarAtualizacaoJogo(mensagem, vencedorJogada, vencedorRodada
 
 /* ====================== Jogo ====================== */
 
-// iniciarPartida inicia a partida usando o inventário dos jogadores
+// iniciarPartida inicia a partida
 func (sala *Sala) iniciarPartida() {
 	sala.mutex.Lock()
+	sala.Estado = "JOGANDO"
 	sala.CartasNaMesa = make(map[string]Carta)
-	sala.PontosRodada = make(map[string]int)
-	sala.PontosPartida = make(map[string]int)
-	sala.NumeroRodada = 1
 	sala.JogadasNaRodada = 0
-	// inicializa pontos
+	sala.Prontos = make(map[string]bool)
+	// Inicializa pontos se necessário
+	if sala.PontosPartida == nil {
+		sala.PontosPartida = make(map[string]int)
+		for _, p := range sala.Jogadores {
+			sala.PontosPartida[p.Nome] = 0
+		}
+	}
+	if sala.PontosRodada == nil {
+		sala.PontosRodada = make(map[string]int)
+	}
 	for _, p := range sala.Jogadores {
 		sala.PontosRodada[p.Nome] = 0
-		sala.PontosPartida[p.Nome] = 0
 	}
-	sala.Estado = "JOGANDO"
-	// zera marcadores de pronto
-	sala.Prontos = make(map[string]bool)
 	sala.mutex.Unlock()
 
-	sala.enviarAtualizacaoJogo("Partida iniciada! Rodada 1 - Use /jogar <cartaID> para jogar uma carta.", "", "")
+	sala.enviarAtualizacaoJogo("[SISTEMA] PARTIDA INICIADA, cada jogador deve digitar /jogar <nomeCarta> para fazer a jogada", "", "")
 }
 
-func (sala *Sala) snapshotUpdate(mensagem, vencedorJogada, vencedorRodada string) protocolo.DadosAtualizacaoJogo {
-	contagem := make(map[string]int, len(sala.Jogadores))
+func (sala *Sala) criarAtualizacaoJogo(mensagem, vencedorJogada, vencedorRodada string) protocolo.DadosAtualizacaoJogo {
+	contagem := make(map[string]int)
 	ultima := make(map[string]Carta)
 	for _, p := range sala.Jogadores {
 		contagem[p.Nome] = len(p.Inventario)
@@ -421,6 +443,9 @@ func (sala *Sala) processarJogada(jogador *Cliente, cartaID string) {
 		return
 	}
 
+	// Carrega cartas atuais do JSON
+	jogador.Inventario = carregarCartasJSON(jogador)
+
 	// Encontra a carta no inventário do jogador (por NOME)
 	var carta Carta
 	var cartaIndex = -1
@@ -448,6 +473,7 @@ func (sala *Sala) processarJogada(jogador *Cliente, cartaID string) {
 
 	// Remove a carta do inventário e coloca na mesa
 	jogador.Inventario = append(jogador.Inventario[:cartaIndex], jogador.Inventario[cartaIndex+1:]...)
+	salvarCartasJSON(jogador, jogador.Inventario) // salva a remoção
 	sala.CartasNaMesa[jogador.Nome] = carta
 	sala.JogadasNaRodada++
 
@@ -459,28 +485,67 @@ func (sala *Sala) processarJogada(jogador *Cliente, cartaID string) {
 		c2 := sala.CartasNaMesa[p2.Nome]
 
 		vencedorJogada := "EMPATE"
+		var vencedor *Cliente
+		var cartaPerdedora Carta
+
 		resultado := compararCartas(c1, c2)
 		if resultado > 0 {
 			vencedorJogada = p1.Nome
 			sala.PontosRodada[p1.Nome]++
+			vencedor = p1
+			cartaPerdedora = c2
 		} else if resultado < 0 {
 			vencedorJogada = p2.Nome
 			sala.PontosRodada[p2.Nome]++
+			vencedor = p2
+			cartaPerdedora = c1
+		} else {
+			// Empate: tie-breaker determinístico por nome (ou ID de conexão)
+			if p1.Nome < p2.Nome {
+				vencedorJogada = p1.Nome
+				sala.PontosRodada[p1.Nome]++
+				vencedor = p1
+				cartaPerdedora = c2
+			} else if p2.Nome < p1.Nome {
+				vencedorJogada = p2.Nome
+				sala.PontosRodada[p2.Nome]++
+				vencedor = p2
+				cartaPerdedora = c1
+			} else {
+				// nomes iguais são extremamente improváveis; manter empate real
+				vencedorJogada = "EMPATE"
+			}
+		}
+
+		// Transferência de cartas se houver vencedor
+		if vencedorJogada != "EMPATE" {
+			// Vencedor ganha a carta do perdedor
+			vencedor.Inventario = append(vencedor.Inventario, cartaPerdedora)
+			salvarCartasJSON(vencedor, vencedor.Inventario)
 		}
 
 		// Mostra resultado da jogada
 		sala.mutex.Unlock()
 		sala.enviarAtualizacaoJogo(fmt.Sprintf("Vencedor da jogada: %s", vencedorJogada), vencedorJogada, "")
 
-		// Verifica se a rodada terminou (2 jogadas)
-		if sala.JogadasNaRodada >= 2 {
-			sala.finalizarRodada()
-		} else {
-			// Próxima jogada da rodada
-			sala.mutex.Lock()
-			sala.CartasNaMesa = make(map[string]Carta)
-			sala.mutex.Unlock()
-			sala.enviarAtualizacaoJogo(fmt.Sprintf("Próxima jogada da rodada %d - Use /jogar <cartaID>", sala.NumeroRodada), "", "")
+		// Mostra cartas atualizadas para ambos jogadores
+		mostrarCartasDetalhadas(p1)
+		mostrarCartasDetalhadas(p2)
+
+		// Limpa mesa para próxima jogada
+		sala.mutex.Lock()
+		sala.CartasNaMesa = make(map[string]Carta)
+		sala.mutex.Unlock()
+		sala.enviarAtualizacaoJogo("Próxima jogada - Use /jogar <nomeCarta>", "", "")
+
+		// Checa fim da partida por 0 cartas
+		if len(p1.Inventario) == 0 || len(p2.Inventario) == 0 {
+			vencedorFinal := p1.Nome
+			if len(p1.Inventario) == 0 && len(p2.Inventario) > 0 {
+				vencedorFinal = p2.Nome
+			}
+			sala.finalizarPartidaPorZeroCartas(vencedorFinal)
+			return
 		}
 		return
 	}
@@ -507,40 +572,44 @@ func (sala *Sala) finalizarRodada() {
 	// Mostra vencedor da rodada
 	sala.enviarAtualizacaoJogo(fmt.Sprintf("Vencedor da rodada %d: %s", sala.NumeroRodada, vencedorRodada), "", vencedorRodada)
 
-	// Limpa inventários dos jogadores
+	// Limpa inventários dos jogadores e arquivos JSON
 	for _, p := range sala.Jogadores {
-		p.Inventario = make([]Carta, 0)
+		limparCartasJSON(p)
 	}
 
-	// Verifica se alguém ganhou 2 rodadas
-	if sala.PontosPartida[sala.Jogadores[0].Nome] >= 2 || sala.PontosPartida[sala.Jogadores[1].Nome] >= 2 {
-		vencedorFinal := "EMPATE"
-		if sala.PontosPartida[sala.Jogadores[0].Nome] >= 2 {
-			vencedorFinal = sala.Jogadores[0].Nome
-		} else {
-			vencedorFinal = sala.Jogadores[1].Nome
-		}
-		sala.Estado = "FINALIZADO"
-		sala.mutex.Unlock()
-
-		// Restaura o estoque de cartas
-		// Nota: Precisamos acessar o servidor para restaurar o estoque
-		// Por simplicidade, vamos apenas mostrar a mensagem de fim
-		sala.broadcast(nil, protocolo.Mensagem{Comando: "FIM_DE_JOGO", Dados: mustJSON(protocolo.DadosFimDeJogo{VencedorNome: vencedorFinal})})
-		return
-	}
-
-	// Próxima rodada
-	sala.NumeroRodada++
+	// Em novo fluxo, rodadas não importam; apenas limpa e aguarda próxima jogada
 	sala.JogadasNaRodada = 0
 	sala.CartasNaMesa = make(map[string]Carta)
 	sala.PontosRodada = make(map[string]int)
 	for _, p := range sala.Jogadores {
 		sala.PontosRodada[p.Nome] = 0
 	}
-
 	sala.mutex.Unlock()
-	sala.enviarAtualizacaoJogo(fmt.Sprintf("Rodada %d - Ambos jogadores devem comprar cartas novamente! Use /buy_pack", sala.NumeroRodada), "", "")
+	sala.enviarAtualizacaoJogo("Nova jogada - Use /jogar <nomeCarta>", "", "")
+}
+
+// finalizarPartidaPorZeroCartas finaliza a partida e reseta sala e estoque
+func (sala *Sala) finalizarPartidaPorZeroCartas(vencedor string) {
+	sala.mutex.Lock()
+	sala.Estado = "FINALIZADO"
+	// limpar JSONs e inventários
+	for _, p := range sala.Jogadores {
+		limparCartasJSON(p)
+	}
+	// restaurar estoque no servidor
+	if sala.srv != nil {
+		sala.srv.estoque = gerarEstoqueInicial()
+	}
+	sala.mutex.Unlock()
+
+	sala.broadcast(nil, protocolo.Mensagem{Comando: "FIM_DE_JOGO", Dados: mustJSON(protocolo.DadosFimDeJogo{VencedorNome: vencedor})})
+
+	// Reiniciar sala para nova partida
+	sala.reiniciarSala()
+	sala.broadcast(nil, protocolo.Mensagem{
+		Comando: "SISTEMA",
+		Dados:   mustJSON(protocolo.DadosErro{Mensagem: "[SISTEMA] Partida finalizada. Use /buy_pack para iniciar uma nova."}),
+	})
 }
 
 /* ====================== Utilidades ====================== */
@@ -572,6 +641,80 @@ func (s *Servidor) enviar(cli *Cliente, msg protocolo.Mensagem) {
 func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+/* ===== Funções auxiliares da sala ===== */
+
+// reiniciarSala limpa todos os dados da sala para uma nova partida
+func (sala *Sala) reiniciarSala() {
+	sala.Estado = "AGUARDANDO_PRONTOS"
+	sala.CartasNaMesa = make(map[string]Carta)
+	sala.PontosRodada = make(map[string]int)
+	sala.PontosPartida = make(map[string]int)
+	sala.NumeroRodada = 1
+	sala.JogadasNaRodada = 0
+	sala.Prontos = make(map[string]bool)
+	// Limpa arquivos JSON das cartas
+	for _, j := range sala.Jogadores {
+		limparCartasJSON(j)
+	}
+}
+
+/* ===== Funções para manipulação de arquivos JSON ===== */
+
+// carregarCartasJSON carrega as cartas do arquivo JSON do jogador
+func carregarCartasJSON(cliente *Cliente) []Carta {
+	data, err := os.ReadFile(cliente.CartasJSON)
+	if err != nil {
+		return []Carta{} // se não existe, retorna vazio
+	}
+
+	var cartas []Carta
+	if err := json.Unmarshal(data, &cartas); err != nil {
+		return []Carta{}
+	}
+	return cartas
+}
+
+// salvarCartasJSON salva as cartas no arquivo JSON do jogador
+func salvarCartasJSON(cliente *Cliente, cartas []Carta) {
+	data, err := json.MarshalIndent(cartas, "", "  ")
+	if err != nil {
+		return
+	}
+	os.WriteFile(cliente.CartasJSON, data, 0644)
+}
+
+// limparCartasJSON remove o arquivo JSON do jogador
+func limparCartasJSON(cliente *Cliente) {
+	os.Remove(cliente.CartasJSON)
+	cliente.Inventario = []Carta{}
+}
+
+// mostrarCartasDetalhadas envia todas as cartas detalhadas para o jogador
+func mostrarCartasDetalhadas(cliente *Cliente) {
+	cartas := carregarCartasJSON(cliente)
+	cliente.Inventario = cartas
+
+	if len(cartas) == 0 {
+		cliente.Mailbox <- protocolo.Mensagem{
+			Comando: "CARTAS_DETALHADAS",
+			Dados:   mustJSON(protocolo.DadosErro{Mensagem: "Você não possui cartas. Use /buy_carta para comprar."}),
+		}
+		return
+	}
+
+	mensagem := "\n=== SUAS CARTAS ===\n"
+	for i, carta := range cartas {
+		mensagem += fmt.Sprintf("%d. %s %s (Poder: %d, Raridade: %s)\n",
+			i+1, carta.Nome, carta.Naipe, carta.Valor, carta.Raridade)
+	}
+	mensagem += "==================\n"
+
+	cliente.Mailbox <- protocolo.Mensagem{
+		Comando: "CARTAS_DETALHADAS",
+		Dados:   mustJSON(protocolo.DadosErro{Mensagem: mensagem}),
+	}
 }
 
 /* ===== Comparação de cartas ===== */
@@ -655,15 +798,6 @@ func gerarEstoqueInicial() map[string][]Carta {
 	return out
 }
 
-// Função para restaurar e embaralhar o estoque após fim da partida
-func (s *Servidor) restaurarEstoque() {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	// Gera novo estoque com poderes aleatórios
-	s.estoque = gerarEstoqueInicial()
-}
-
 func sampleRaridade() string {
 	// C=70, U=20, R=9, L=1 (100)
 	x := rand.Intn(100)
@@ -678,5 +812,3 @@ func sampleRaridade() string {
 		return "L"
 	}
 }
-
-// Esta função não é mais usada no novo sistema

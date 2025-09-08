@@ -15,9 +15,9 @@ var meuInventario []protocolo.Carta
 
 func printAjuda() {
 	fmt.Println("\n------------ COMANDOS ---------------")
-	fmt.Println("/buy_pack       - compra 10 cartas (apenas fora da partida)")
-	fmt.Println("/jogar <nome da carta> - no lobby: inicia; em jogo: joga carta específica")
-	fmt.Println("qualquer coisa escrita fora desses comandos será representado como um chat")
+	fmt.Println("/buy_pack - Deve ser comprado logo ao entrar na sala")
+	fmt.Println("/jogar <NomeCarta>- Depois que ambos estiverem prontos joguem suas cartas escolhidas")
+	fmt.Println("Qualquer coisa escrita fora desses comandos aparecerá como chat")
 	fmt.Println("-------------------------------------")
 	fmt.Print("> ")
 }
@@ -37,47 +37,30 @@ func lerServidor(conn net.Conn) {
 			var dados protocolo.DadosPartidaEncontrada
 			if err := json.Unmarshal(msg.Dados, &dados); err == nil {
 				fmt.Printf("\r[SISTEMA] Sala encontrada! Oponente: %s.\n", dados.OponenteNome)
-				printAjuda()
 			}
 
 		case "ATUALIZACAO_JOGO":
 			var dados protocolo.DadosAtualizacaoJogo
 			if err := json.Unmarshal(msg.Dados, &dados); err == nil {
-				fmt.Printf("\n--- Status da Rodadfda %d ---\n", dados.NumeroRodada)
+				fmt.Printf("\r--- Rodada %d ---\n", dados.NumeroRodada)
 				fmt.Println(dados.MensagemDoTurno)
 				if len(dados.UltimaJogada) > 0 {
-					fmt.Println("Cartas na mesa:")
+					fmt.Println("\nCartas na mesa:")
 					for nome, carta := range dados.UltimaJogada {
-						fmt.Printf("  - %s jogou: %s %s (Poder: %d)\n", nome, carta.Nome, carta.Naipe, carta.Valor)
+						fmt.Printf("  %s: %s %s (Poder: %d)\n", nome, carta.Nome, carta.Naipe, carta.Valor)
 					}
 				}
-				if dados.VencedorJogada != "" {
-					if dados.VencedorJogada == "EMPATE" {
-						fmt.Println("Vencedor da jogada: EMPATE")
-					} else {
-						fmt.Printf("Vencedor da jogada: %s\n", dados.VencedorJogada)
-					}
+				if dados.VencedorJogada != "" && dados.VencedorJogada != "EMPATE" {
+					fmt.Printf("\nVencedor da jogada: %s\n", dados.VencedorJogada)
 				}
-				if dados.VencedorRodada != "" {
-					if dados.VencedorRodada == "EMPATE" {
-						fmt.Printf("Vencedor da rodada %d: EMPATE\n", dados.NumeroRodada)
-					} else {
-						fmt.Printf("Vencedor da rodada %d: %s\n", dados.NumeroRodada, dados.VencedorRodada)
-					}
+				if dados.VencedorRodada != "" && dados.VencedorRodada != "EMPATE" {
+					fmt.Printf("Vencedor da rodada %d: %s\n", dados.NumeroRodada, dados.VencedorRodada)
 				}
-				fmt.Println("Cartas no inventário:")
+				fmt.Println("\nCartas restantes:")
 				for nome, contagem := range dados.ContagemCartas {
-					fmt.Printf("  - %s: %d cartas\n", nome, contagem)
+					fmt.Printf("  %s: %d cartas\n", nome, contagem)
 				}
-				// Mostra inventário do jogador atual
-				if len(meuInventario) > 0 {
-					fmt.Println("\nSuas cartas:")
-					for _, carta := range meuInventario {
-						fmt.Printf("  - %s %s (ID: %s, Poder: %d, Raridade: %s)\n",
-							carta.Nome, carta.Naipe, carta.ID, carta.Valor, carta.Raridade)
-					}
-				}
-				fmt.Println("------------------------")
+				fmt.Println("-------------------")
 				fmt.Print("> ")
 			}
 
@@ -105,6 +88,18 @@ func lerServidor(conn net.Conn) {
 				}
 				fmt.Printf("\n[Pacote] Você recebeu: %s | estoque=%d\n", strings.Join(n, ", "), r.EstoqueRestante)
 				fmt.Print("> ")
+			}
+
+		case "CARTAS_DETALHADAS":
+			var e protocolo.DadosErro
+			if err := json.Unmarshal(msg.Dados, &e); err == nil {
+				fmt.Printf("\r%s\n> ", e.Mensagem)
+			}
+
+		case "SISTEMA":
+			var e protocolo.DadosErro
+			if err := json.Unmarshal(msg.Dados, &e); err == nil {
+				fmt.Printf("\r%s\n> ", e.Mensagem)
 			}
 
 		case "RECEBER_CHAT":
@@ -167,6 +162,12 @@ func main() {
 		}
 
 		switch partes[0] {
+		case "/buy_carta":
+			_ = encoder.Encode(protocolo.Mensagem{
+				Comando: "BUY_CARTA",
+				Dados:   mustJSON(struct{}{}),
+			})
+
 		case "/jogar":
 			if len(partes) < 2 {
 				fmt.Println("[SISTEMA] Uso: /jogar <nome da carta>")
