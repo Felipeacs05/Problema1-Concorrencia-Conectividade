@@ -13,11 +13,11 @@ type Mensagem struct {
 // Carta é única no estoque (id) e possui raridade.
 // Campos extras (Naipe/Nome/Valor) ajudam a exibir e jogar.
 type Carta struct {
-	ID        string `json:"id"`
-	Nome      string `json:"nome"`
-	Naipe     string `json:"naipe,omitempty"`
-	Valor     int    `json:"valor"`               // 1..13 (maior vence)
-	Raridade  string `json:"raridade,omitempty"`  // C, U, R, L
+	ID       string `json:"id"`
+	Nome     string `json:"nome"`
+	Naipe    string `json:"naipe"`              // "♠", "♥", "♦", "♣"
+	Valor    int    `json:"valor"`              // 1..13 (Ás=1, Rei=13)
+	Raridade string `json:"raridade,omitempty"` // C, U, R, L
 }
 
 type ComprarPacoteReq struct {
@@ -44,6 +44,10 @@ type DadosEnviarChat struct {
 	Texto string `json:"texto"`
 }
 
+type DadosJogarCarta struct {
+	CartaID string `json:"cartaID"`
+}
+
 type DadosReceberChat struct {
 	NomeJogador string `json:"nomeJogador"`
 	Texto       string `json:"texto"`
@@ -53,9 +57,13 @@ type DadosReceberChat struct {
 
 type DadosAtualizacaoJogo struct {
 	MensagemDoTurno string           `json:"mensagemDoTurno"`
-	ContagemCartas  map[string]int   `json:"contagemCartas"`  // nome -> restantes no baralho
-	UltimaJogada    map[string]Carta `json:"ultimaJogada"`    // nome -> carta recém jogada
-	VencedorRodada  string           `json:"vencedorRodada"`  // nome / EMPATE / ""
+	ContagemCartas  map[string]int   `json:"contagemCartas"` // nome -> restantes no inventário
+	UltimaJogada    map[string]Carta `json:"ultimaJogada"`   // nome -> carta recém jogada
+	VencedorJogada  string           `json:"vencedorJogada"` // nome / EMPATE / ""
+	VencedorRodada  string           `json:"vencedorRodada"` // nome / EMPATE / ""
+	NumeroRodada    int              `json:"numeroRodada"`   // 1, 2, 3
+	PontosRodada    map[string]int   `json:"pontosRodada"`   // nome -> pontos na rodada atual
+	PontosPartida   map[string]int   `json:"pontosPartida"`  // nome -> rodadas ganhas
 }
 
 type DadosFimDeJogo struct {

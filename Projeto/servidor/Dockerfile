@@ -8,7 +8,7 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /main ./servidor
 
-# Estágio 2: Final
+# Estágio 2: Finalf
 FROM alpine:latest
 COPY --from=builder /main /main
 CMD ["/main"]
