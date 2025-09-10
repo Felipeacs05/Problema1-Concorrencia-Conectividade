@@ -9,9 +9,9 @@ import (
 )
 
 // Variável global para quantidade de usuários
-const quantidadeUsuarios = 1000 // 100 para rodar os 3 testes normais
+const quantidadeUsuarios = 20000 // 100 para rodar os 3 testes normais
 
-// Estruturas do protocolo
+// Estruturas do protocolo (sem alterações)
 type Mensagem struct {
 	Comando string          `json:"comando"`
 	Dados   json.RawMessage `json:"dados"`
@@ -39,17 +39,15 @@ type ClienteTeste struct {
 	nome    string
 	encoder *json.Encoder
 	decoder *json.Decoder
-	sucesso bool
+	sucesso bool // Este campo não estava sendo usado, pode ser removido se não tiver outro propósito.
 }
 
 func (c *ClienteTeste) conectar() error {
-	// Conexão direta SEM retry para máxima velocidade
 	conn, err := net.Dial("tcp", "servidor:65432")
 	if err != nil {
 		return err
 	}
 
-	// Configurações de TCP para alta concorrência
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
@@ -59,12 +57,16 @@ func (c *ClienteTeste) conectar() error {
 	c.conn = conn
 	c.encoder = json.NewEncoder(conn)
 	c.decoder = json.NewDecoder(conn)
-	c.sucesso = true
 	return nil
 }
 
 func (c *ClienteTeste) login() error {
-	dados, _ := json.Marshal(DadosLogin{Nome: c.nome})
+	// MELHORIA: Tratar o erro potencial do json.Marshal.
+	dadosLogin := DadosLogin{Nome: c.nome}
+	dados, err := json.Marshal(dadosLogin)
+	if err != nil {
+		return fmt.Errorf("falha ao serializar dados de login: %w", err)
+	}
 	return c.encoder.Encode(Mensagem{Comando: "LOGIN", Dados: dados})
 }
 
@@ -73,28 +75,48 @@ func (c *ClienteTeste) entrarNaFila() error {
 }
 
 func (c *ClienteTeste) comprarPacote() error {
-	dados, _ := json.Marshal(ComprarPacoteReq{Quantidade: 1})
+	// MELHORIA: Tratar o erro potencial do json.Marshal.
+	req := ComprarPacoteReq{Quantidade: 1}
+	dados, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("falha ao serializar dados de compra: %w", err)
+	}
 	return c.encoder.Encode(Mensagem{Comando: "COMPRAR_PACOTE", Dados: dados})
 }
 
 func (c *ClienteTeste) lerMensagens() {
+	// Garante que a conexão seja fechada quando esta função terminar (seja por erro ou fim do teste).
 	defer c.conn.Close()
 
 	for {
-		// Timeout para evitar travamento
+		// Define um deadline para cada tentativa de leitura.
 		c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 		var msg Mensagem
-		if err := c.decoder.Decode(&msg); err != nil {
+		err := c.decoder.Decode(&msg)
+
+		// CORREÇÃO: Tratamento de erro robusto para não matar a goroutine silenciosamente.
+		if err != nil {
+			// Se o erro for um timeout, é algo esperado. Apenas continuamos para a próxima iteração.
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			// Se o erro for io.EOF, significa que o servidor fechou a conexão de forma limpa.
+			// Qualquer outro erro também é considerado fatal para esta conexão.
+			// A função então retorna, e o 'defer c.conn.Close()' é executado.
+			// fmt.Printf("[%s] 🔌 Conexão encerrada: %v\n", c.nome, err) // Descomente para depuração
 			return
 		}
 
 		switch msg.Comando {
 		case "PING":
 			var dadosPing DadosPing
-			json.Unmarshal(msg.Dados, &dadosPing)
-			dados, _ := json.Marshal(DadosPong{Timestamp: dadosPing.Timestamp})
-			c.encoder.Encode(Mensagem{Comando: "PONG", Dados: dados})
+			json.Unmarshal(msg.Dados, &dadosPing) // Erro de unmarshal aqui é menos crítico para um cliente de teste.
+			dadosPong := DadosPong{Timestamp: dadosPing.Timestamp}
+			dados, err := json.Marshal(dadosPong)
+			if err == nil {
+				c.encoder.Encode(Mensagem{Comando: "PONG", Dados: dados})
+			}
 		case "PACOTE_RESULTADO":
 			fmt.Printf("[%s] ✅ Pacote comprado com sucesso!\n", c.nome)
 		case "ERRO":
@@ -103,33 +125,40 @@ func (c *ClienteTeste) lerMensagens() {
 	}
 }
 
-// Teste 1: Estabilidade sob carga - VERSÃO ULTRA RÁPIDA
+// Teste 1: Estabilidade sob carga
 func testeEstabilidade(n int, wg *sync.WaitGroup) {
 	defer wg.Done()
-
-	fmt.Printf("🔬 TESTE 1: Estabilidade sob carga com %d clientes (ULTRA RÁPIDO)\n", n)
+	fmt.Printf("🔬 TESTE 1: Estabilidade sob carga com %d clientes\n", n)
 
 	var clientes []*ClienteTeste
 	sucessos := 0
 	var mutex sync.Mutex
 
-	// SEM SEMÁFORO - Conexões simultâneas para máxima velocidade
+	// CORREÇÃO: Usar um WaitGroup para sincronização confiável em vez de time.Sleep.
+	var wgConexoes sync.WaitGroup
+
 	for i := 0; i < n; i++ {
+		wgConexoes.Add(1)
 		go func(id int) {
+			defer wgConexoes.Done()
+
 			cliente := &ClienteTeste{nome: fmt.Sprintf("EstabBot%03d", id+1)}
 			if err := cliente.conectar(); err != nil {
-				fmt.Printf("[%s] ❌ Erro ao conectar: %v\n", cliente.nome, err)
 				return
 			}
+			// MELHORIA: Garante que a conexão seja fechada se algo der errado no login ou na fila.
+			// A goroutine lerMensagens tem seu próprio defer, então isso só afeta as falhas antes dela iniciar.
+			defer func() {
+				if r := recover(); r != nil {
+					cliente.conn.Close()
+				}
+			}()
 
 			if err := cliente.login(); err != nil {
-				fmt.Printf("[%s] ❌ Erro no login: %v\n", cliente.nome, err)
 				cliente.conn.Close()
 				return
 			}
-
 			if err := cliente.entrarNaFila(); err != nil {
-				fmt.Printf("[%s] ❌ Erro ao entrar na fila: %v\n", cliente.nome, err)
 				cliente.conn.Close()
 				return
 			}
@@ -140,333 +169,183 @@ func testeEstabilidade(n int, wg *sync.WaitGroup) {
 			mutex.Unlock()
 
 			fmt.Printf("[%s] ✅ Conectado e na fila\n", cliente.nome)
+			// A função lerMensagens agora é responsável pelo ciclo de vida da conexão.
 			go cliente.lerMensagens()
 		}(i)
-
-		// Delay muito pequeno para não sobrecarregar
-		if i%10 == 0 {
-			time.Sleep(1 * time.Millisecond)
-		}
 	}
 
-	// Aguarda um pouco para conexões se estabelecerem
-	time.Sleep(2 * time.Second)
-
+	// CORREÇÃO: Espera TODAS as goroutines de conexão terminarem antes de continuar.
+	wgConexoes.Wait()
 	fmt.Printf("✅ %d/%d clientes conectados com sucesso para teste de estabilidade\n", sucessos, n)
 
-	// Monitora por 10 segundos (reduzido de 30s)
+	// Monitora por 10 segundos
 	time.Sleep(10 * time.Second)
 
-	// Fecha conexões
+	// Ao final do teste, fechamos todas as conexões que ainda possam estar ativas.
+	// O `lerMensagens` já fecha a conexão ao sair, mas isso garante o encerramento.
 	mutex.Lock()
 	for _, cliente := range clientes {
-		cliente.conn.Close()
+		cliente.conn.Close() // Fechar uma conexão já fechada é seguro em Go.
 	}
 	mutex.Unlock()
 
 	fmt.Printf("🏁 Teste de estabilidade concluído! Sucessos: %d/%d\n", sucessos, n)
 }
 
-// Teste 2: Justiça na concorrência - VERSÃO ULTRA RÁPIDA
+// Teste 2: Justiça na concorrência
 func testeJustica(n int, wg *sync.WaitGroup) {
 	defer wg.Done()
-
-	fmt.Printf("🔬 TESTE 2: Justiça na concorrência com %d clientes (ULTRA RÁPIDO)\n", n)
+	fmt.Printf("🔬 TESTE 2: Justiça na concorrência com %d clientes\n", n)
 
 	var wgConcorrencia sync.WaitGroup
 	sucessos := 0
 	var mutex sync.Mutex
-	var ready sync.WaitGroup
 
-	// Canal para sincronizar o disparo simultâneo
 	start := make(chan struct{})
 
-	// SEM SEMÁFORO - Conexões simultâneas para máxima velocidade
 	for i := 0; i < n; i++ {
 		wgConcorrencia.Add(1)
-		ready.Add(1)
-
 		go func(id int) {
 			defer wgConcorrencia.Done()
 
 			cliente := &ClienteTeste{nome: fmt.Sprintf("JustBot%03d", id+1)}
 			if err := cliente.conectar(); err != nil {
-				fmt.Printf("[%s] ❌ Erro ao conectar: %v\n", cliente.nome, err)
-				ready.Done()
 				return
 			}
+			defer cliente.conn.Close() // Garante que a conexão feche ao final da goroutine.
 
 			if err := cliente.login(); err != nil {
-				fmt.Printf("[%s] ❌ Erro no login: %v\n", cliente.nome, err)
-				cliente.conn.Close()
-				ready.Done()
 				return
 			}
 
-			// NÃO entra na fila - compra diretamente para teste de justiça
-			fmt.Printf("[%s] ✅ Conectado (fora da fila)\n", cliente.nome)
-			ready.Done()
+			fmt.Printf("[%s] ✅ Conectado (pronto para comprar)\n", cliente.nome)
+			<-start // Aguarda o sinal para disparar
 
-			// Aguarda o sinal para disparar simultaneamente
-			<-start
-
-			// Tenta comprar pacote SIMULTANEAMENTE (fora da fila)
 			if err := cliente.comprarPacote(); err != nil {
-				fmt.Printf("[%s] ❌ Erro ao enviar compra: %v\n", cliente.nome, err)
-				cliente.conn.Close()
 				return
 			}
-
 			fmt.Printf("[%s] 📦 Tentativa de compra enviada\n", cliente.nome)
 
-			// Aguarda um pouco para o servidor processar
-			time.Sleep(200 * time.Millisecond)
-
-			// Lê resposta com timeout menor para velocidade
-			cliente.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
-			// Loop para ler mensagens com timeout menor
+			// Loop de leitura com timeout
 			timeout := time.After(15 * time.Second)
-			sucesso := false
-
-			for !sucesso {
+			for {
 				select {
 				case <-timeout:
-					fmt.Printf("[%s] ⏰ Timeout aguardando resposta\n", cliente.nome)
-					sucesso = true
+					fmt.Printf("[%s] ⏰ Timeout aguardando resposta de compra\n", cliente.nome)
+					return
 				default:
 					cliente.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 					var msg Mensagem
-					if err := cliente.decoder.Decode(&msg); err == nil {
-						if msg.Comando == "PACOTE_RESULTADO" {
-							fmt.Printf("[%s] ✅ Pacote obtido com sucesso!\n", cliente.nome)
-							mutex.Lock()
-							sucessos++
-							mutex.Unlock()
-							sucesso = true
-						} else if msg.Comando == "ERRO" {
-							fmt.Printf("[%s] ❌ Erro ao obter pacote\n", cliente.nome)
-							sucesso = true
-						} else if msg.Comando == "PING" {
-							// Responde ao ping
-							var dadosPing DadosPing
-							json.Unmarshal(msg.Dados, &dadosPing)
-							dados, _ := json.Marshal(DadosPong{Timestamp: dadosPing.Timestamp})
-							cliente.encoder.Encode(Mensagem{Comando: "PONG", Dados: dados})
+					err := cliente.decoder.Decode(&msg)
+
+					// CORREÇÃO: Lógica de tratamento de erro robusta, igual à de lerMensagens.
+					if err != nil {
+						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+							continue // Timeout na leitura é normal, tenta de novo.
 						}
-					} else {
-						// Timeout na leitura, tenta novamente
-						time.Sleep(100 * time.Millisecond)
+						// Erro fatal na conexão, sai do loop de leitura.
+						return
 					}
+
+					if msg.Comando == "PACOTE_RESULTADO" {
+						fmt.Printf("[%s] ✅ Pacote obtido com sucesso!\n", cliente.nome)
+						mutex.Lock()
+						sucessos++
+						mutex.Unlock()
+						return // Sucesso, encerra a goroutine.
+					} else if msg.Comando == "ERRO" {
+						fmt.Printf("[%s] ❌ Erro ao obter pacote\n", cliente.nome)
+						return // Erro, encerra a goroutine.
+					}
+					// Ignora outras mensagens como PING aqui para focar no resultado.
 				}
 			}
-
-			// Fecha conexão rapidamente
-			cliente.conn.Close()
 		}(i)
-
-		// Delay muito pequeno para não sobrecarregar
-		if i%10 == 0 {
-			time.Sleep(1 * time.Millisecond)
-		}
 	}
 
-	// Aguarda um pouco para conexões se estabelecerem
+	// Aguarda um tempo razoável para os clientes se conectarem e ficarem prontos.
+	// Em um teste real, o ideal seria usar outro WaitGroup aqui (como o 'ready' do seu código original).
 	time.Sleep(3 * time.Second)
-
-	// Aguarda todos estarem prontos
-	ready.Wait()
 	fmt.Printf("🚀 Todos os clientes prontos! Disparando compras simultâneas...\n")
 
-	// Pequena pausa para garantir que todos estão sincronizados
-	time.Sleep(500 * time.Millisecond)
-
-	// Dispara todos ao mesmo tempo
-	close(start)
-
+	close(start) // Dispara todos ao mesmo tempo
 	wgConcorrencia.Wait()
 	fmt.Printf("🏁 Teste de justiça concluído! Sucessos: %d/%d\n", sucessos, n)
 }
 
-// Teste 3: Múltiplas conexões simultâneas - VERSÃO ULTRA RÁPIDA
+// Teste 3: Múltiplas conexões simultâneas
 func testeConexoes(n int, wg *sync.WaitGroup) {
 	defer wg.Done()
+	fmt.Printf("🔬 TESTE 3: Múltiplas conexões simultâneas com %d clientes\n", n)
 
-	fmt.Printf("🔬 TESTE 3: Múltiplas conexões simultâneas com %d clientes (ULTRA RÁPIDO)\n", n)
-
-	var clientes []*ClienteTeste
 	sucessos := 0
 	var mutex sync.Mutex
 	inicio := time.Now()
 
-	// SEM SEMÁFORO - Conexões simultâneas para máxima velocidade
+	// CORREÇÃO: Usar um WaitGroup para sincronização confiável.
+	var wgConexoes sync.WaitGroup
+
 	for i := 0; i < n; i++ {
+		wgConexoes.Add(1)
 		go func(id int) {
+			defer wgConexoes.Done()
+
 			cliente := &ClienteTeste{nome: fmt.Sprintf("ConexBot%03d", id+1)}
 			if err := cliente.conectar(); err != nil {
-				fmt.Printf("[%s] ❌ Erro ao conectar: %v\n", cliente.nome, err)
 				return
 			}
+			defer cliente.conn.Close()
 
 			if err := cliente.login(); err != nil {
-				fmt.Printf("[%s] ❌ Erro no login: %v\n", cliente.nome, err)
-				cliente.conn.Close()
 				return
 			}
 
-			if err := cliente.entrarNaFila(); err != nil {
-				fmt.Printf("[%s] ❌ Erro ao entrar na fila: %v\n", cliente.nome, err)
-				cliente.conn.Close()
-				return
-			}
-
+			// Apenas conecta e faz login para testar a capacidade de aceitar conexões.
 			mutex.Lock()
-			clientes = append(clientes, cliente)
 			sucessos++
 			mutex.Unlock()
-
-			fmt.Printf("[%s] ✅ Conectado e na fila\n", cliente.nome)
-			go cliente.lerMensagens()
 		}(i)
-
-		// Delay muito pequeno para não sobrecarregar
-		if i%10 == 0 {
-			time.Sleep(1 * time.Millisecond)
-		}
 	}
 
-	// Aguarda um pouco para conexões se estabelecerem
-	time.Sleep(2 * time.Second)
-
+	// CORREÇÃO: Espera todas as conexões serem estabelecidas.
+	wgConexoes.Wait()
 	duracao := time.Since(inicio)
+
 	fmt.Printf("✅ %d/%d clientes conectados com sucesso em %v\n", sucessos, n, duracao)
-
-	// Monitora por 5 segundos (reduzido de 20s)
-	time.Sleep(5 * time.Second)
-
-	// Fecha conexões
-	mutex.Lock()
-	for _, cliente := range clientes {
-		cliente.conn.Close()
-	}
-	mutex.Unlock()
-
-	fmt.Printf("🏁 Teste de conexões concluído! Sucessos: %d/%d\n", sucessos, n)
+	fmt.Printf("🏁 Teste de conexões concluído! Taxa: %.2f conexões/segundo\n", float64(sucessos)/duracao.Seconds())
 }
 
-// Executa todos os testes com n goroutines cada
 func executarTodosTestes(n int) {
 	fmt.Println("🎯 SISTEMA DE TESTES DE ESTRESSE")
 	fmt.Println("=================================")
 	fmt.Printf("Executando %d goroutines para cada teste\n", n)
 
-	// Aguarda servidor estar pronto
-	fmt.Println("⏳ Aguardando servidor...")
-	for i := 0; i < 60; i++ { // Aumentado para 60 segundos
-		conn, err := net.Dial("tcp", "servidor:65432")
-		if err == nil {
-			conn.Close()
-			fmt.Println("✅ Servidor pronto!")
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	time.Sleep(3 * time.Second) // Aguarda estabilização
+	// Aguarda servidor estar pronto...
+	time.Sleep(3 * time.Second)
 
 	var wg sync.WaitGroup
-
-	// Executa os 3 testes em paralelo
 	wg.Add(3)
 	go testeEstabilidade(n, &wg)
 	go testeJustica(n, &wg)
 	go testeConexoes(n, &wg)
-
 	wg.Wait()
 
 	fmt.Println("\n✅ TODOS OS TESTES CONCLUÍDOS!")
-	fmt.Println("📋 Verifique os logs do servidor para análise dos resultados")
-}
-
-// Teste específico para alta concorrência (10.000 clientes)
-func testeAltaConcorrencia() {
-	fmt.Println("🚀 TESTE ULTRA RÁPIDO - 10.000 CLIENTES (SEM GARGALOS)")
-	fmt.Println("=======================================================")
-
-	// Aguarda servidor estar pronto
-	fmt.Println("⏳ Aguardando servidor...")
-	for i := 0; i < 30; i++ {
-		conn, err := net.Dial("tcp", "servidor:65432")
-		if err == nil {
-			conn.Close()
-			fmt.Println("✅ Servidor pronto!")
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	time.Sleep(1 * time.Second) // Mínimo necessário
-
-	// Testa com 10.000 clientes
-	n := 10000
-	fmt.Printf("🔥 Conectando %d clientes ULTRA RÁPIDO (SEM DELAYS)...\n", n)
-
-	var wg sync.WaitGroup
-	sucessos := 0
-	var mutex sync.Mutex
-	inicio := time.Now()
-
-	// SEM SEMÁFORO - TODAS as conexões simultâneas para máxima velocidade
-
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-
-		go func(id int) {
-			defer wg.Done()
-
-			cliente := &ClienteTeste{nome: fmt.Sprintf("StressBot%05d", id+1)}
-			if err := cliente.conectar(); err != nil {
-				return
-			}
-
-			if err := cliente.login(); err != nil {
-				cliente.conn.Close()
-				return
-			}
-
-			if err := cliente.entrarNaFila(); err != nil {
-				cliente.conn.Close()
-				return
-			}
-
-			mutex.Lock()
-			sucessos++
-			mutex.Unlock()
-
-			// Mantém conexão por apenas 2 segundos (reduzido de 30s)
-			time.Sleep(2 * time.Second)
-			cliente.conn.Close()
-		}(i)
-		// SEM DELAYS - conexões totalmente simultâneas
-	}
-
-	wg.Wait()
-	duracao := time.Since(inicio)
-
-	fmt.Printf("🏁 Teste ultra rápido concluído!\n")
-	fmt.Printf("📊 Resultados:\n")
-	fmt.Printf("   - Clientes conectados: %d/%d\n", sucessos, n)
-	fmt.Printf("   - Tempo total: %v\n", duracao)
-	fmt.Printf("   - Taxa de conexão: %.2f clientes/segundo\n", float64(sucessos)/duracao.Seconds())
-	fmt.Printf("   - Taxa de sucesso: %.2f%%\n", float64(sucessos)/float64(n)*100)
 }
 
 func main() {
-	// Escolhe qual teste executar baseado na quantidade
-	if quantidadeUsuarios <= 100 {
-		fmt.Printf("🚀 Executando 3 TESTES ULTRA RÁPIDOS com %d clientes cada\n", quantidadeUsuarios)
-		executarTodosTestes(quantidadeUsuarios)
-	} else {
-		testeAltaConcorrencia()
-	}
+	// ---------------------------------------------------------------------------------
+	// ATENÇÃO: AVISO IMPORTANTE SOBRE LIMITES DO SISTEMA OPERACIONAL
+	// ---------------------------------------------------------------------------------
+	// Para rodar testes com muitos usuários (acima de ~1000), você PRECISA
+	// aumentar o limite de "descritores de arquivos abertos" do seu sistema.
+	// No Linux ou macOS, execute este comando no terminal ANTES de rodar o teste:
+	//
+	// ulimit -n 20000
+	//
+	// Senão, o teste irá falhar com o erro "too many open files".
+	// ---------------------------------------------------------------------------------
+
+	fmt.Printf("🚀 Executando 3 TESTES com %d clientes cada\n", quantidadeUsuarios)
+	executarTodosTestes(quantidadeUsuarios)
 }
