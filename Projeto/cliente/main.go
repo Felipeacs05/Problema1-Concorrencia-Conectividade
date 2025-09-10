@@ -16,7 +16,7 @@ var meuInventario []protocolo.Carta
 func printAjuda() {
 	fmt.Println("\n------------ COMANDOS ---------------")
 	fmt.Println("/buy_pack - Deve ser comprado logo ao entrar na sala")
-	fmt.Println("/jogar <NomeCarta>- Depois que ambos estiverem prontos joguem suas cartas escolhidas")
+	fmt.Println("/jogar <cartaID> - Depois que ambos estiverem prontos joguem suas cartas escolhidas usando o ID da carta")
 	fmt.Println("Qualquer coisa escrita fora desses comandos aparecerá como chat")
 	fmt.Println("-------------------------------------")
 	fmt.Print("> ")
@@ -84,9 +84,9 @@ func lerServidor(conn net.Conn) {
 
 				n := make([]string, 0, len(r.Cartas))
 				for _, c := range r.Cartas {
-					n = append(n, fmt.Sprintf("%s(poder = %d)", c.Nome, c.Valor))
+					n = append(n, fmt.Sprintf("%s(ID: %s, poder = %d)", c.Nome, c.ID, c.Valor))
 				}
-				fmt.Printf("\n[Pacote] Você recebeu: %s | estoque=%d\n", strings.Join(n, ", "), r.EstoqueRestante)
+				fmt.Printf("\n[Pacote] Você recebeu: %s | pacotes restantes=%d\n", strings.Join(n, ", "), r.EstoqueRestante)
 				fmt.Print("> ")
 			}
 
@@ -110,6 +110,17 @@ func lerServidor(conn net.Conn) {
 					prefix = "[VOCÊ]"
 				}
 				fmt.Printf("\r%s: %s\n> ", prefix, dadosChat.Texto)
+			}
+
+		case "PING":
+			var dadosPing protocolo.DadosPing
+			if err := json.Unmarshal(msg.Dados, &dadosPing); err == nil {
+				// Responde ao ping do servidor
+				encoder := json.NewEncoder(conn)
+				encoder.Encode(protocolo.Mensagem{
+					Comando: "PONG",
+					Dados:   mustJSON(protocolo.DadosPong{Timestamp: dadosPing.Timestamp}),
+				})
 			}
 
 		case "ERRO":

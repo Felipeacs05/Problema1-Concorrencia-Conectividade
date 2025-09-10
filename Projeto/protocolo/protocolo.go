@@ -11,7 +11,7 @@ type Mensagem struct {
 /* ===================== Cartas / Inventário ===================== */
 
 // Carta é única no estoque (id) e possui raridade.
-// Campos extras (Naipe/Nome/Valor) ajudam a exibir e jogar.
+// Campos extras (Naipe/Nome/Valor) ajudam a exibir le jogar.
 type Carta struct {
 	ID       string `json:"id"`
 	Nome     string `json:"nome"`
@@ -74,4 +74,14 @@ type DadosFimDeJogo struct {
 
 type DadosErro struct {
 	Mensagem string `json:"mensagem"`
+}
+
+/* ===================== Ping ===================== */
+
+type DadosPing struct {
+	Timestamp int64 `json:"timestamp"`
+}
+
+type DadosPong struct {
+	Timestamp int64 `json:"timestamp"`
 }
