@@ -30,18 +30,12 @@ services:
     depends_on:
       - servidor
 
-  teste-estresse:
+  cliente-estresse:
     build:
-      context: ./teste
-      dockerfile: ./Dockerfile
+      context: .
+      dockerfile: ./cliente_estresse/Dockerfile
     depends_on:
       - servidor
-    command: ["./estresse"]
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-          cpus: '2.0'
-        reservations:
-          memory: 2G
-          cpus: '1.0'
+    # Este serviço não inicia por padrão. Use 'docker-compose run' para executá-lo.
+    # Exemplo: docker-compose run cliente-estresse 100
+    entrypoint: ["/main"]
