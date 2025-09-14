@@ -1,16 +1,37 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"meujogo/protocolo"
 	"net"
+	"sort"
 	"sync"
 	"time"
 )
 
-// Bot representa um cliente de teste automatizado.
+// --- Configurações do Teste ---
+const (
+	numBots        = 10000            // Altere o número de jogadores simultâneos aqui
+	testDuration   = 90 * time.Second // Duração total do teste
+	rampUpDuration = 30 * time.Second // Tempo para iniciar todos os bots gradualmente
+	serverAddr     = "servidor:65432"
+)
+
+// TestReport armazena os resultados consolidados do teste.
+type TestReport struct {
+	totalBots            int
+	connectionsSucceeded int
+	purchasesSucceeded   int
+	gamesCompleted       int
+	totalErrors          int
+	latencies            []time.Duration
+	mu                   sync.Mutex
+}
+
+// Bot representa um cliente de teste.
 type Bot struct {
 	ID         int
 	Conn       net.Conn
@@ -18,153 +39,224 @@ type Bot struct {
 	Decoder    *json.Decoder
 	Nome       string
 	Inventario []protocolo.Carta
-	done       chan bool
 	pingStart  time.Time
-	mu         sync.Mutex
+	mu         sync.Mutex // Protege o inventário
 }
 
-// NovoBot cria e conecta um novo bot ao servidor.
-func NovoBot(id int, serverAddr string) (*Bot, error) {
+// runBotLifecycle agora simula partidas completas e loga latência em tempo real.
+func runBotLifecycle(ctx context.Context, botID int, report *TestReport, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	conn, err := net.DialTimeout("tcp", serverAddr, 10*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("bot %d: falha ao conectar: %v", id, err)
+		log.Printf("❌ Bot %d: Falha ao conectar: %v", botID, err)
+		report.mu.Lock()
+		report.totalErrors++
+		report.mu.Unlock()
+		return
 	}
+	defer conn.Close()
+
+	report.mu.Lock()
+	report.connectionsSucceeded++
+	report.mu.Unlock()
 
 	bot := &Bot{
-		ID:      id,
+		ID:      botID,
 		Conn:    conn,
 		Encoder: json.NewEncoder(conn),
 		Decoder: json.NewDecoder(conn),
-		Nome:    fmt.Sprintf("Bot-%d", id),
-		done:    make(chan bool),
+		Nome:    fmt.Sprintf("Bot-%d", botID),
 	}
-	return bot, nil
-}
 
-// Executar inicia a lógica do bot.
-func (b *Bot) Executar() {
-	defer b.Conn.Close()
-	go b.lerServidor()
+	incomingMessages := make(chan protocolo.Mensagem, 10)
+	errChan := make(chan error, 1)
+	go readFromServer(bot, incomingMessages, errChan)
 
-	// 1. Login
-	b.enviarComando("LOGIN", protocolo.DadosLogin{Nome: b.Nome})
+	enviarComando(bot, "LOGIN", protocolo.DadosLogin{Nome: bot.Nome})
+	enviarComando(bot, "ENTRAR_NA_FILA", nil)
 
-	// 2. Entrar na fila
-	b.enviarComando("ENTRAR_NA_FILA", nil)
+	pingTicker := time.NewTicker(5 * time.Second)
+	defer pingTicker.Stop()
 
-	// Aguarda o fim do jogo
-	<-b.done
-	log.Printf("Bot %d (%s) terminou.", b.ID, b.Nome)
-}
-
-func (b *Bot) enviarComando(comando string, dados interface{}) {
-	var rawDados json.RawMessage
-	if dados != nil {
-		jsonBytes, err := json.Marshal(dados)
-		if err != nil {
-			log.Printf("Bot %d: erro ao serializar dados: %v", b.ID, err)
+	for {
+		select {
+		case msg := <-incomingMessages:
+			switch msg.Comando {
+			case "PARTIDA_ENCONTRADA":
+				enviarComando(bot, "COMPRAR_PACOTE", protocolo.ComprarPacoteReq{Quantidade: 1})
+			case "PACOTE_RESULTADO":
+				var resp protocolo.ComprarPacoteResp
+				if json.Unmarshal(msg.Dados, &resp) == nil {
+					report.mu.Lock()
+					report.purchasesSucceeded++
+					report.mu.Unlock()
+					bot.mu.Lock()
+					bot.Inventario = resp.Cartas
+					bot.mu.Unlock()
+					// Joga a primeira carta imediatamente para iniciar a partida.
+					jogarPrimeiraCarta(bot)
+				}
+			case "ATUALIZACAO_JOGO":
+				var dados protocolo.DadosAtualizacaoJogo
+				if json.Unmarshal(msg.Dados, &dados) == nil {
+					// Apenas joga a próxima carta se a jogada anterior foi resolvida
+					// (indicado pela presença de um vencedor da jogada).
+					if dados.VencedorJogada != "" {
+						jogarPrimeiraCarta(bot)
+					}
+				}
+			case "FIM_DE_JOGO":
+				// Fase 3: Partida Concluída
+				report.mu.Lock()
+				report.gamesCompleted++
+				report.mu.Unlock()
+				enviarComando(bot, "ENTRAR_NA_FILA", nil)
+			case "PONG":
+				if !bot.pingStart.IsZero() {
+					latencia := time.Since(bot.pingStart)
+					// A latência é armazenada para o relatório final, mas não é logada em tempo real.
+					report.mu.Lock()
+					report.latencies = append(report.latencies, latencia)
+					report.mu.Unlock()
+				}
+			case "PING": // Adicionado para responder aos pings do servidor
+				var dadosPing protocolo.DadosPing
+				if json.Unmarshal(msg.Dados, &dadosPing) == nil {
+					enviarComando(bot, "PONG", protocolo.DadosPong{Timestamp: dadosPing.Timestamp})
+				}
+			}
+		case <-pingTicker.C:
+			bot.pingStart = time.Now()
+			enviarComando(bot, "PING", protocolo.DadosPing{Timestamp: time.Now().UnixMilli()})
+		case err := <-errChan:
+			// Não loga EOF como erro, pois é esperado.
+			if err.Error() != "EOF" {
+				log.Printf("❌ Bot %d: Erro de comunicação: %v. Saindo.", bot.ID, err)
+				report.mu.Lock()
+				report.totalErrors++
+				report.mu.Unlock()
+			}
+			return
+		case <-ctx.Done():
+			enviarComando(bot, "QUIT", nil)
 			return
 		}
-		rawDados = jsonBytes
-	}
-
-	msg := protocolo.Mensagem{Comando: comando, Dados: rawDados}
-	if err := b.Encoder.Encode(msg); err != nil {
-		log.Printf("Bot %d: erro ao enviar comando '%s': %v", b.ID, comando, err)
 	}
 }
 
-func (b *Bot) lerServidor() {
+// readFromServer é uma goroutine que apenas lê do socket e envia para um canal.
+func readFromServer(b *Bot, incoming chan<- protocolo.Mensagem, errs chan<- error) {
 	for {
 		var msg protocolo.Mensagem
 		if err := b.Decoder.Decode(&msg); err != nil {
-			log.Printf("❌ Bot %d (%s) desconectado inesperadamente.", b.ID, b.Nome)
-			close(b.done)
+			errs <- err
 			return
 		}
-
-		switch msg.Comando {
-		case "PARTIDA_ENCONTRADA":
-			// 3. Comprar pacote para iniciar
-			b.enviarComando("COMPRAR_PACOTE", protocolo.ComprarPacoteReq{Quantidade: 1})
-
-		case "PACOTE_RESULTADO":
-			var resp protocolo.ComprarPacoteResp
-			if json.Unmarshal(msg.Dados, &resp) == nil {
-				b.Inventario = resp.Cartas
-			}
-
-		case "ATUALIZACAO_JOGO":
-			// 4. Jogar a primeira carta válida
-			if len(b.Inventario) > 0 {
-				cartaAJogar := b.Inventario[0]
-				b.Inventario = b.Inventario[1:] // Remove a carta da mão (simulação simples)
-				b.enviarComando("JOGAR_CARTA", protocolo.DadosJogarCarta{CartaID: cartaAJogar.ID})
-			}
-
-		case "FIM_DE_JOGO":
-			// 5. O jogo acabou, medir a latência final e depois sair.
-			b.mu.Lock()
-			b.pingStart = time.Now()
-			b.mu.Unlock()
-			b.enviarComando("PING", protocolo.DadosPing{Timestamp: time.Now().UnixMilli()})
-			// Não fecha o 'done' aqui, aguarda o PONG para calcular a latência.
-			return
-
-		case "PONG":
-			var dadosPong protocolo.DadosPong
-			if json.Unmarshal(msg.Dados, &dadosPong) == nil {
-				b.mu.Lock()
-				start := b.pingStart
-				b.mu.Unlock()
-				// Verifica se estávamos esperando por este PONG para finalizar.
-				if !start.IsZero() {
-					latencia := time.Since(start)
-					// Usa float64 para obter precisão decimal em milissegundos.
-					log.Printf("✅ Bot %d (%s) terminou. Latência final: %.3fms", b.ID, b.Nome, float64(latencia.Microseconds())/1000.0)
-					close(b.done)
-					return
-				}
-			}
-
-		case "PING":
-			var dadosPing protocolo.DadosPing
-			if json.Unmarshal(msg.Dados, &dadosPing) == nil {
-				b.enviarComando("PONG", protocolo.DadosPong{Timestamp: dadosPing.Timestamp})
-			}
-		}
+		incoming <- msg
 	}
 }
 
+func jogarPrimeiraCarta(b *Bot) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.Inventario) > 0 {
+		cartaAJogar := b.Inventario[0]
+		b.Inventario = b.Inventario[1:] // Remove a carta da mão
+		enviarComando(b, "JOGAR_CARTA", protocolo.DadosJogarCarta{CartaID: cartaAJogar.ID})
+	}
+}
+
+func enviarComando(b *Bot, comando string, dados interface{}) {
+	var rawDados json.RawMessage
+	if dados != nil {
+		jsonBytes, _ := json.Marshal(dados)
+		rawDados = jsonBytes
+	}
+	msg := protocolo.Mensagem{Comando: comando, Dados: rawDados}
+	b.Encoder.Encode(msg)
+}
+
 func main() {
-	// ==================================================
-	// CONFIGURE AQUI O NÚMERO DE BOTS PARA O TESTE
-	const numBots = 100
-	// ==================================================
+	log.Printf("Iniciando teszzzte de estresse com %d bots por %v (aquecimento de %v)...", numBots, testDuration, rampUpDuration)
 
-	serverAddr := "servidor:65432"
-	// Opcional: Para testar localmente fora do Docker, você pode mudar para:
-	// serverAddr = "localhost:65432"
-
-	log.Printf("Iniciando teste de estresse com %d bots contra %s...", numBots, serverAddr)
-
+	report := &TestReport{totalBots: numBots}
 	var wg sync.WaitGroup
-	wg.Add(numBots)
+	var printOnce sync.Once // Garante que o relatório seja impresso apenas uma vez.
 
-	for i := 0; i < numBots; i++ {
-		time.Sleep(10 * time.Millisecond) // Pequeno intervalo para não sobrecarregar o accept() do servidor de uma vez
-		go func(botID int) {
-			defer wg.Done()
-			bot, err := NovoBot(botID, serverAddr)
-			if err != nil {
-				log.Printf("❌ Erro ao criar bot %d: %v", botID, err)
-				return
-			}
-			bot.Executar()
-		}(i)
+	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
+	defer cancel()
+
+	// Calcula o intervalo entre o início de cada bot para distribuí-los ao longo do ramp-up.
+	intervalo := time.Duration(0)
+	if numBots > 0 {
+		intervalo = rampUpDuration / time.Duration(numBots)
 	}
 
-	log.Println("Todos os bots foram iniciados. Aguardando a conclusão...")
-	wg.Wait()
-	log.Println("Teste de estresse concluído.")
+	for i := 0; i < numBots; i++ {
+		wg.Add(1)
+		go runBotLifecycle(ctx, i, report, &wg)
+		time.Sleep(intervalo) // Espera o intervalo calculado antes de iniciar o próximo bot.
+	}
+
+	log.Println("Todos os bots foram iniciados. Teste em andamento...")
+
+	// Goroutine para esperar o fim do teste e imprimir o relatório.
+	go func() {
+		wg.Wait()
+		printOnce.Do(func() { printReport(report) })
+	}()
+
+	<-ctx.Done()
+	log.Println("Tempo do teste esgotado. Aguardando bots finalizarem...")
+	// Espera um pouco mais para os bots receberem o sinal de ctx.Done() e saírem.
+	time.Sleep(2 * time.Second)
+	printOnce.Do(func() { printReport(report) }) // Imprime caso o wg.Wait() não tenha sido alcançado.
+}
+
+func printReport(r *TestReport) {
+	fmt.Println("\n======================================")
+	fmt.Println("    Relatório Final do Teste de Estresse")
+	fmt.Println("======================================")
+	fmt.Printf("Duração do Teste:        %v\n", testDuration)
+	fmt.Printf("Total de Bots:           %d\n", r.totalBots)
+	fmt.Println("--------------------------------------")
+	fmt.Printf("Conexões bem-sucedidas:  %d / %d\n", r.connectionsSucceeded, r.totalBots)
+	fmt.Printf("Total de Compras:          %d\n", r.purchasesSucceeded)
+	fmt.Printf("Partidas concluídas:       %d\n", r.gamesCompleted)
+	fmt.Printf("Total de Erros:            %d\n", r.totalErrors)
+	fmt.Println("--------------------------------------")
+
+	if len(r.latencies) > 0 {
+		sort.Slice(r.latencies, func(i, j int) bool {
+			return r.latencies[i] < r.latencies[j]
+		})
+
+		var totalLatencia time.Duration
+		for _, l := range r.latencies {
+			totalLatencia += l
+		}
+
+		minLat := r.latencies[0]
+		maxLat := r.latencies[len(r.latencies)-1]
+		avgLat := totalLatencia / time.Duration(len(r.latencies))
+		p95Index := int(float64(len(r.latencies)) * 0.95)
+		if p95Index >= len(r.latencies) {
+			p95Index = len(r.latencies) - 1
+		}
+		if p95Index < 0 {
+			p95Index = 0
+		}
+		p95Lat := r.latencies[p95Index]
+
+		fmt.Println("Estatísticas de Latência (ms):")
+		fmt.Printf("  Mínima: %.3fms\n", float64(minLat.Microseconds())/1000.0)
+		fmt.Printf("  Média:  %.3fms\n", float64(avgLat.Microseconds())/1000.0)
+		fmt.Printf("  Máxima: %.3fms\n", float64(maxLat.Microseconds())/1000.0)
+		fmt.Printf("  P95:    %.3fms\n", float64(p95Lat.Microseconds())/1000.0)
+	} else {
+		fmt.Println("Nenhuma medição de latência registrada.")
+	}
+
+	fmt.Println("======================================")
 }

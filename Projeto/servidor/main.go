@@ -312,6 +312,16 @@ func (s *Servidor) clienteReader(cliente *Cliente) {
 			s.mostrarCartasDetalhadas(cliente)
 		case "SAIR_DA_SALA":
 			s.handleSairDaSala(cliente)
+		case "QUIT":
+			return // Encerra a goroutine do leitor, o que levará à limpeza da conexão.
+		case "PING":
+			var dadosPing protocolo.DadosPing
+			if json.Unmarshal(msg.Dados, &dadosPing) == nil {
+				s.enviar(cliente, protocolo.Mensagem{
+					Comando: "PONG",
+					Dados:   mustJSON(protocolo.DadosPong{Timestamp: dadosPing.Timestamp}),
+				})
+			}
 		}
 	}
 }
@@ -636,11 +646,8 @@ func (sala *Sala) processarJogada(jogador *Cliente, cartaID string) {
 
 		if vencedor != nil {
 			sala.PontosRodada[vencedor.Nome]++
-			vencedor.Inventario = append(vencedor.Inventario, c1, c2) // Vencedor leva as duas
-		} else { // Empate, devolve as cartas
-			p1.Inventario = append(p1.Inventario, c1)
-			p2.Inventario = append(p2.Inventario, c2)
 		}
+		// As cartas são descartadas e não retornam ao inventário.
 
 		// Limpa a mesa para a próxima jogada
 		sala.CartasNaMesa = make(map[string]Carta)
@@ -648,15 +655,20 @@ func (sala *Sala) processarJogada(jogador *Cliente, cartaID string) {
 
 		sala.enviarAtualizacaoJogo(fmt.Sprintf("Vencedor da jogada: %s", vencedorJogada), vencedorJogada, "")
 
-		// Checa fim da partida por 0 cartas
-		if len(p1.Inventario) == 0 || len(p2.Inventario) == 0 {
-			vencedorFinal := p1.Nome
-			if len(p1.Inventario) == 0 {
+		// Checa fim da partida por 0 cartas (agora acontecerá após 5 rodadas)
+		if len(p1.Inventario) == 0 {
+			vencedorFinal := "EMPATE"
+			p1Pontos := sala.PontosRodada[p1.Nome]
+			p2Pontos := sala.PontosRodada[p2.Nome]
+			if p1Pontos > p2Pontos {
+				vencedorFinal = p1.Nome
+			} else if p2Pontos > p1Pontos {
 				vencedorFinal = p2.Nome
 			}
 			sala.finalizarPartida(vencedorFinal)
 			return
 		}
+
 		sala.enviarAtualizacaoJogo("Próxima jogada. Use /jogar <ID_da_carta> para jogar ou /cartas para ver sua mão.", "", "")
 		return
 	}
