@@ -4,27 +4,32 @@ Este repositório contém a implementação do Problema 1 da disciplina TEC502 -
 
 ## 📝 Descrição do Projeto
 
-O projeto consiste no desenvolvimento de um novo jogo de cartas online multiplayer, focado em duelos táticos e coleção de cartas. A arquitetura é baseada em um servidor centralizado que gerencia a lógica do jogo, o estado dos jogadores e a comunicação entre eles em tempo real.
+O projeto consiste no desenvolvimento de um jogo de cartas online multiplayer, focado em duelos táticos 1v1 e coleção de cartas. A arquitetura é baseada em um servidor centralizado de alta concorrência, construído em Go, que gerencia a lógica do jogo, o estado dos jogadores, o pareamento em tempo real e a distribuição de cartas.
 
-O sistema foi projetado para permitir que múltiplos jogadores se conectem simultaneamente e se enfrentem em partidas 1v1, com um sistema de pareamento que garante duelos únicos. Toda a comunicação foi implementada utilizando a biblioteca nativa de sockets da linguagem Go, sem o uso de frameworks de comunicação, conforme as restrições do problema.
+O sistema foi projetado para suportar milhares de jogadores simultâneos, utilizando Goroutines para escalabilidade e canais para comunicação segura entre os componentes. Toda a comunicação foi implementada utilizando a biblioteca nativa de sockets TCP da linguagem Go, sem o uso de frameworks de comunicação, conforme as restrições do problema.
 
 ## ✨ Funcionalidades Implementadas
 
-  * **Servidor Concorrente:** O servidor utiliza Goroutines para lidar com múltiplos clientes de forma concorrente e eficiente, permitindo que várias interações ocorram simultaneamente.
-  * **Comunicação via Protocolo Estruturado:** A comunicação entre cliente e servidor é feita através de um protocolo customizado baseado em JSON, garantindo robustez e clareza na troca de mensagens.
-  * **Chat Interativo em Tempo Real:** Como prova de conceito da comunicação bidirecional, foi implementado um sistema de chat que permite que dois clientes, conectados ao servidor, troquem mensagens em tempo real.
-  * **Gerenciamento de Estado:** O servidor mantém um estado centralizado dos clientes conectados, utilizando mutexes para garantir a segurança em acessos concorrentes.
-  * **Ambiente Containerizado:** Todos os componentes do projeto (servidor e cliente) são executados em contêineres Docker, garantindo um ambiente de execução e teste padronizado e reprodutível.
+* **Servidor Concorrente de Alta Performance:** O servidor utiliza Goroutines para lidar com milhares de clientes de forma concorrente e eficiente. Emprega otimizações como *worker pools* para processamento de tarefas pesadas (compra de pacotes) e `sync.Pool` para reduzir a alocação de memória e a carga no Garbage Collector.
+* **Pareamento de Partidas 1v1:** Sistema de fila automatizado que pareia jogadores para partidas únicas assim que dois deles estão disponíveis.
+* **Mecânica de Jogo Completa:**
+    * **Compra de Pacotes:** Jogadores podem comprar pacotes de cartas de um estoque global. O sistema garante a distribuição justa e atômica, mesmo sob alta contenção.
+    * **Batalha de Cartas:** A lógica de turno permite que os jogadores joguem cartas de seu inventário. O vencedor da jogada é determinado pelo poder e naipe da carta.
+* **Comunicação Robusta via Protocolo Estruturado:** A comunicação entre cliente e servidor é feita através de um protocolo customizado baseado em JSON, garantindo clareza e manutenibilidade na troca de mensagens.
+* **Chat em Tempo Real:** Uma funcionalidade de chat permite que os jogadores de uma mesma sala troquem mensagens durante a partida.
+* **Medição de Latência:** Os jogadores podem verificar a latência (ping) com o servidor a qualquer momento com o comando `/ping`.
+* **Testes de Estresse:** O projeto inclui um cliente de teste de estresse capaz de simular milhares de conexões simultâneas para validar a estabilidade, o desempenho e a justiça do servidor sob carga pesada.
+* **Ambiente Containerizado:** Todos os componentes do projeto (servidor, cliente e cliente de estresse) são executados em contêineres Docker, garantindo um ambiente de execução e teste padronizado e reprodutível.
 
 ## 🛠️ Arquitetura e Tecnologias
 
-  * **Linguagem:** Go
-  * **Concorrência:** Goroutines e Channels
-  * **Comunicação:** Sockets TCP Nativos
-  * **Serialização de Dados:** JSON
-  * **Containerização:** Docker & Docker Compose
+* **Linguagem:** Go
+* **Concorrência:** Goroutines, Channels, `sync.Mutex`, `sync.Map` e `sync.Pool`.
+* **Comunicação:** Sockets TCP Nativos (pacote `net`)
+* **Serialização de Dados:** JSON
+* **Containerização:** Docker & Docker Compose
 
-A arquitetura segue o modelo Cliente-Servidor. O servidor (`/servidor`) é o "cérebro" da aplicação, mantendo o estado e orquestrando a comunicação. Os clientes (`/cliente`) são aplicações de terminal interativas que se conectam ao servidor para enviar e receber informações. O pacote `/protocolo` define as estruturas de dados compartilhadas entre ambos, garantindo a consistência da comunicação.
+A arquitetura segue o modelo Cliente-Servidor. O servidor (`/servidor`) é o núcleo da aplicação, mantendo o estado global, gerenciando as salas de jogo e orquestrando toda a comunicação. Os clientes (`/cliente`) são aplicações de terminal interativas que se conectam ao servidor para enviar comandos e receber atualizações de estado. O pacote `/protocolo` define as estruturas de dados compartilhadas, garantindo a consistência da comunicação.
 
 ## 🚀 Como Executar o Projeto
 
@@ -32,69 +37,56 @@ Para executar o projeto, você precisará ter o **Docker** e o **Docker Compose*
 
 ### Pré-requisitos
 
-  * Git
-  * Docker (`>= 20.10`)
-  * Docker Compose
+* Git
+* Docker (`>= 20.10`)
+* Docker Compose
 
 ### Passos para Execução
 
 1.  **Clone o repositório:**
-
     ```bash
-    git clone https://github.com/Felipeacs05/Problema1-Concorrencia-Conectividade
-    cd Projeto/
+    git clone [https://github.com/Felipeacs05/Problema1-Concorrencia-Conectividade](https://github.com/Felipeacs05/Problema1-Concorrencia-Conectividade)
+    cd Problema1-Concorrencia-Conectividade/Projeto/
     ```
 
-2.  **Inicie o Servidor (Terminal 1):**
-    Abra um terminal na pasta raiz do projeto (`Projeto/`) e execute o comando abaixo. Este comando irá construir a imagem Docker do servidor e iniciá-la.
-
+2.  **Inicie o Servidor:**
+    Abra um terminal na pasta raiz do projeto (`Projeto/`) e execute o comando abaixo para construir a imagem Docker do servidor e iniciá-la.
     ```bash
     docker compose up --build servidor
     ```
+    Este terminal se tornará o console do servidor. Deixe-o rodando.
 
-    Este terminal se tornará o console do servidor. Você verá os logs de conexões e mensagens aqui. Deixe-o rodando.
+3.  **Conecte os Jogadores:**
+    Abra **dois novos terminais** separados e navegue até a **mesma pasta** `Projeto/`. Execute os seguintes comandos (um em cada terminal):
 
-3.  **Conecte o Primeiro Jogador (Terminal 2):**
-    Abra um **novo** terminal, navegue até a **mesma pasta** `Projeto/` e execute o comando:
+    * **Terminal do Jogador A:**
+        ```bash
+        docker compose run --rm cliente
+        ```
+    * **Terminal do Jogador B:**
+        ```bash
+        docker compose run --rm cliente
+        ```
 
-    ```bash
-    docker compose run --name jogador_a cliente
-    ```
+4.  **Jogue a Partida:**
+    Siga as instruções no terminal de cada jogador. Eles serão pareados automaticamente. Usem os comandos abaixo para interagir com o jogo.
 
-    Este comando cria um contêiner interativo para o primeiro jogador. Um prompt `>` aparecerá, esperando que você digite as mensagens do chat.
+### Comandos do Jogo
 
-4.  **Conecte o Segundo Jogador (Terminal 3):**
-    Abra um **terceiro** terminal, navegue até a pasta `Projeto/` e execute o comando:
+* `/comprar` - Compra um pacote de cartas para iniciar a partida.
+* `/jogar <ID_da_carta>` - Joga uma carta da sua mão.
+* `/cartas` - Mostra as cartas que você tem na mão.
+* `/ping` - Mede sua latência com o servidor.
+* `/sair` - Abandona a partida atual e volta para a fila.
+* Qualquer outro texto digitado é enviado como uma mensagem de chat para o oponente.
 
-    ```bash
-    docker compose run --name jogador_b cliente
-    ```
+### Executando o Teste de Estresse
 
-    Este será o terminal do segundo jogador.
+Para simular uma grande quantidade de jogadores e testar a performance do servidor, execute o serviço `cliente-estresse`:
 
-5.  **Teste o Chat:**
-    Agora você pode digitar uma mensagem no terminal do Jogador A e apertar Enter. A mensagem aparecerá no terminal do Jogador B, e vice-versa.
+```bash
+# Inicie o servidor primeiro (em modo detached)
+docker compose up -d servidor
 
-6.  **Para Encerrar:**
-    Para parar todos os contêineres e remover a rede, volte ao **Terminal 1** (o do servidor) e pressione `Ctrl + C`. Depois, para garantir que tudo seja limpo, execute:
-
-    ```bash
-    docker compose down
-    ```
-
-## 📂 Estrutura de Arquivos
-
-```
-Projeto/
-├── .gitignore          # Arquivos a serem ignorados pelo Git
-├── go.mod              # Define o módulo Go e suas dependências
-├── docker-compose.yml  # Orquestra os serviços de servidor e cliente
-├── servidor/
-│   ├── main.go         # Código-fonte do servidor concorrente
-│   └── Dockerfile      # Receita para construir a imagem Docker do servidor
-├── cliente/
-│   ├── main.go         # Código-fonte do cliente interativo
-│   └── Dockerfile      # Receita para construir a imagem Docker do cliente
-└── protocolo/
-    └── protocolo.go    # Definições das structs (JSON) compartilhadas
-```
+# Execute o teste de estresse
+docker compose run --rm cliente-estresse
