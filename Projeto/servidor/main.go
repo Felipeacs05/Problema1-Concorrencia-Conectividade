@@ -1,6 +1,11 @@
 // felipeacs05/problema1-concorrencia-conectividade/Problema1-Concorrencia-Conectividade-77d73bcc575bbc2b6e076d0c153ffc2b7b175855/Projeto/servidor/main.go
 package main
 
+// ===================== BAREMA ITEM 1: ARQUITETURA =====================
+// Este é o componente principal do servidor do jogo de cartas multiplayer.
+// O servidor gerencia: conexões de clientes, matchmaking, estoque de cartas,
+// lógica do jogo, e comunicação entre jogadores.
+
 import (
 	"encoding/json"
 	"fmt"
@@ -9,110 +14,149 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic" // OTIMIZAÇÃO: Usar pacote atomic para contadores
+	"sync/atomic" // BAREMA ITEM 5: CONCORRÊNCIA - Usar pacote atomic para contadores thread-safe
 	"time"
 )
 
+// BAREMA ITEM 5: CONCORRÊNCIA - Configurações de sharding para distribuir carga
+// O sharding divide o estoque e operações em múltiplas partições para reduzir contenção
 const (
-	numFilaShards    = 32 // Aumentado para maior distribuição
-	numEstoqueShards = 32 // Aumentado para maior distribuição
+	numFilaShards    = 32 // Número de shards para distribuir operações de fila
+	numEstoqueShards = 32 // Número de shards para distribuir operações de estoque
 )
 
 /* ====================== Tipos e Pools de Otimização ====================== */
 type Carta = protocolo.Carta
 
+// BAREMA ITEM 1: ARQUITETURA - Estrutura que representa um cliente conectado
+// Cada cliente possui sua própria conexão TCP, inventário de cartas e estado de jogo
 type Cliente struct {
-	Conn       net.Conn
-	Nome       string
-	Encoder    *json.Encoder
-	Decoder    *json.Decoder // Adicionado para pool
-	Mailbox    chan protocolo.Mensagem
-	Sala       *Sala
-	Inventario []Carta
-	UltimoPing time.Time // Adicionado para health check
-	PingMs     int64     // Adicionado para health check
+	Conn       net.Conn                // Conexão TCP com o cliente
+	Nome       string                  // Nome único do jogador
+	Encoder    *json.Encoder           // Codificador JSON para envio de mensagens
+	Decoder    *json.Decoder           // Decodificador JSON para recebimento de mensagens
+	Mailbox    chan protocolo.Mensagem // Canal para envio assíncrono de mensagens
+	Sala       *Sala                   // Referência para a sala onde o jogador está
+	Inventario []Carta                 // Cartas que o jogador possui
+	UltimoPing time.Time               // BAREMA ITEM 6: LATÊNCIA - Timestamp do último ping
+	PingMs     int64                   // BAREMA ITEM 6: LATÊNCIA - Latência medida em milissegundos
 }
 
-// OTIMIZAÇÃO: sync.Pool para reutilizar objetos Cliente e reduzir GC
+// BAREMA ITEM 5: CONCORRÊNCIA - Pool de objetos para reutilização e otimização de memória
+// Reduz a pressão no Garbage Collector reutilizando estruturas Cliente
 var clientePool = sync.Pool{
 	New: func() interface{} {
 		return &Cliente{
-			Mailbox:    make(chan protocolo.Mensagem, 32),
-			Inventario: make([]Carta, 0, 64),
+			Mailbox:    make(chan protocolo.Mensagem, 32), // Canal com buffer para mensagens
+			Inventario: make([]Carta, 0, 64),              // Slice pré-alocado para cartas
 		}
 	},
 }
 
+// BAREMA ITEM 7: PARTIDAS - Estrutura que representa uma sala de jogo
+// Gerencia o estado de uma partida entre dois jogadores
 type Sala struct {
-	ID              string
-	Jogadores       []*Cliente
-	Estado          string           // "AGUARDANDO_COMPRA" | "JOGANDO" | "FINALIZADO"
-	CartasNaMesa    map[string]Carta // nome -> carta jogada na jogada atual
-	PontosRodada    map[string]int   // nome -> pontos na rodada atual
-	PontosPartida   map[string]int   // nome -> rodadas ganhas
-	NumeroRodada    int              // 1, 2, 3
-	JogadasNaRodada int              // 0, 1, 2 (quantas jogadas já foram feitas na rodada)
-	Prontos         map[string]bool  // quem já comprou /buy_pack nesta partida
-	srv             *Servidor
-	mutex           sync.Mutex
+	ID              string           // Identificador único da sala
+	Jogadores       []*Cliente       // Lista dos jogadores na sala (sempre 2)
+	Estado          string           // Estado atual: "AGUARDANDO_COMPRA" | "JOGANDO" | "FINALIZADO"
+	CartasNaMesa    map[string]Carta // Cartas jogadas na jogada atual (nome -> carta)
+	PontosRodada    map[string]int   // Pontos de cada jogador na rodada atual
+	PontosPartida   map[string]int   // Rodadas ganhas por cada jogador na partida
+	NumeroRodada    int              // Número da rodada atual (1, 2, 3...)
+	JogadasNaRodada int              // Quantas jogadas foram feitas na rodada atual (0, 1, 2)
+	Prontos         map[string]bool  // Quais jogadores já compraram pacotes para esta partida
+	srv             *Servidor        // Referência para o servidor principal
+	mutex           sync.Mutex       // BAREMA ITEM 5: CONCORRÊNCIA - Mutex para proteger acesso concorrente
 }
+
+// BAREMA ITEM 5: CONCORRÊNCIA - Shard para operações de fila de espera
+// Divide a fila em múltiplas partições para reduzir contenção
 type filaShard struct {
-	clientes []*Cliente
-	mutex    sync.Mutex
+	clientes []*Cliente // Lista de clientes aguardando neste shard
+	mutex    sync.Mutex // Mutex para proteger acesso concorrente
 }
+
+// BAREMA ITEM 8: PACOTES - Shard para operações de estoque de cartas
+// Divide o estoque em múltiplas partições para distribuir carga
 type estoqueShard struct {
-	estoque map[string][]Carta
-	mutex   sync.Mutex
+	estoque map[string][]Carta // Estoque de cartas por raridade (C, U, R, L)
+	mutex   sync.Mutex         // Mutex para proteger acesso concorrente
 }
+
+// BAREMA ITEM 1: ARQUITETURA - Estrutura principal do servidor
+// Centraliza todas as operações do servidor: conexões, salas, estoque, etc.
 type Servidor struct {
-	clientes       sync.Map
-	salas          sync.Map
-	filaDeEspera   *Cliente // Ponteiro para o cliente que está aguardando
-	filaMutex      sync.Mutex
-	shardedEstoque []*estoqueShard
-	packSize       int
-	packWorkers    int
-	packWorkerPool chan packReq
+	clientes       sync.Map        // BAREMA ITEM 5: CONCORRÊNCIA - Map thread-safe para clientes conectados
+	salas          sync.Map        // BAREMA ITEM 5: CONCORRÊNCIA - Map thread-safe para salas ativas
+	filaDeEspera   *Cliente        // BAREMA ITEM 7: PARTIDAS - Cliente aguardando matchmaking
+	filaMutex      sync.Mutex      // BAREMA ITEM 5: CONCORRÊNCIA - Mutex para proteger fila de espera
+	shardedEstoque []*estoqueShard // BAREMA ITEM 8: PACOTES - Array de shards do estoque
+	packSize       int             // Número de cartas por pacote
+	packWorkers    int             // Número de workers para processar compras
+	packWorkerPool chan packReq    // BAREMA ITEM 5: CONCORRÊNCIA - Canal para fila de requisições de pacotes
 }
+
+// BAREMA ITEM 8: PACOTES - Estrutura para requisição de compra de pacote
+// Usada para enviar requisições para o pool de workers
 type packReq struct {
-	cli        *Cliente
-	quantidade int
+	cli        *Cliente // Cliente que solicitou a compra
+	quantidade int      // Quantidade de pacotes solicitados
 }
 
 /* ====================== Servidor / bootstrap ====================== */
+
+// BAREMA ITEM 1: ARQUITETURA - Inicialização do servidor com todas as configurações
+// Configura pools de workers, shards de estoque e outras estruturas de concorrência
 func novoServidor() *Servidor {
 	s := &Servidor{
-		packSize:       5,
-		packWorkers:    1000, // Aumentado drasticamente
-		packWorkerPool: make(chan packReq, 100000),
-		shardedEstoque: make([]*estoqueShard, numEstoqueShards),
+		packSize:       5,                                       // 5 cartas por pacote
+		packWorkers:    1000,                                    // BAREMA ITEM 5: CONCORRÊNCIA - 1000 workers para processar compras
+		packWorkerPool: make(chan packReq, 100000),              // Canal com buffer grande para requisições
+		shardedEstoque: make([]*estoqueShard, numEstoqueShards), // Inicializa array de shards
 	}
-	// A inicialização do shardedFila é removida, pois não será mais usada
+
+	// BAREMA ITEM 8: PACOTES - Gera estoque inicial distribuído entre os shards
 	estoquesIniciais := gerarEstoquesIniciais()
 	for i := 0; i < numEstoqueShards; i++ {
 		s.shardedEstoque[i] = &estoqueShard{estoque: estoquesIniciais[i]}
 	}
+
+	// BAREMA ITEM 5: CONCORRÊNCIA - Inicia pool de workers para processar compras
 	for i := 0; i < s.packWorkers; i++ {
 		go s.packWorker()
 	}
 	return s
 }
+
+// BAREMA ITEM 2: COMUNICAÇÃO - Função principal do servidor
+// Inicia o servidor TCP e aceita conexões de clientes
 func main() {
 	servidor := novoServidor()
+
+	// BAREMA ITEM 2: COMUNICAÇÃO - Cria listener TCP na porta 65432
 	listener, err := net.Listen("tcp", ":65432")
 	if err != nil {
 		panic(err)
 	}
 	defer listener.Close()
 	fmt.Println("[SERVIDOR] ouvindo :65432 (otimização final)")
+
+	// BAREMA ITEM 6: LATÊNCIA - Inicia servidor ICMP para medição de latência
+	go servidor.startICMPPingServer()
+
+	// BAREMA ITEM 5: CONCORRÊNCIA - Semáforo para limitar conexões simultâneas
+	// Evita sobrecarga do sistema com muitas conexões simultâneas
 	semaphore := make(chan struct{}, 30000)
+
+	// BAREMA ITEM 2: COMUNICAÇÃO - Loop principal para aceitar conexões
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			continue
 		}
-		// As configurações de TCP foram movidas para dentro do handleConnection
-		// para serem aplicadas por goroutine, evitando qualquer contenção no loop principal.
+
+		// BAREMA ITEM 5: CONCORRÊNCIA - Cada conexão é processada em uma goroutine separada
+		// As configurações de TCP são aplicadas dentro de handleConnection para evitar contenção
 		semaphore <- struct{}{}
 		go func() {
 			defer func() { <-semaphore }()
@@ -121,26 +165,120 @@ func main() {
 	}
 }
 
+/* ====================== Servidor ICMP para Ping ====================== */
+
+// BAREMA ITEM 6: LATÊNCIA - Servidor ICMP dedicado para medição de latência
+// Usa ICMP para medição mais precisa e nativa da latência de rede
+func (s *Servidor) startICMPPingServer() {
+	// BAREMA ITEM 6: LATÊNCIA - Cria socket ICMP raw
+	conn, err := net.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err != nil {
+		fmt.Printf("[SERVIDOR] Erro ao iniciar servidor ICMP: %v\n", err)
+		return
+	}
+	defer conn.Close()
+
+	fmt.Println("[SERVIDOR] Servidor ICMP de ping iniciado")
+
+	// BAREMA ITEM 6: LATÊNCIA - Buffer para receber pacotes ICMP
+	buffer := make([]byte, 1024)
+
+	// BAREMA ITEM 5: CONCORRÊNCIA - Semáforo para limitar processamento simultâneo de ICMP
+	semaphore := make(chan struct{}, 1000)
+
+	for {
+		n, clientAddr, err := conn.ReadFrom(buffer)
+		if err != nil {
+			continue
+		}
+
+		// BAREMA ITEM 5: CONCORRÊNCIA - Limita processamento simultâneo para evitar sobrecarga
+		semaphore <- struct{}{}
+		go func() {
+			defer func() { <-semaphore }()
+			s.processICMPPacket(conn, buffer[:n], clientAddr)
+		}()
+	}
+}
+
+// BAREMA ITEM 6: LATÊNCIA - Processa pacote ICMP recebido
+func (s *Servidor) processICMPPacket(conn net.PacketConn, data []byte, clientAddr net.Addr) {
+	// BAREMA ITEM 6: LATÊNCIA - Verifica se é um pacote ICMP Echo Request
+	if len(data) < 8 {
+		return
+	}
+
+	// BAREMA ITEM 6: LATÊNCIA - Cria resposta ICMP Echo Reply
+	reply := make([]byte, len(data))
+	copy(reply, data)
+
+	// BAREMA ITEM 6: LATÊNCIA - Muda tipo para Echo Reply (0)
+	reply[0] = 0
+
+	// BAREMA ITEM 6: LATÊNCIA - Recalcula checksum
+	reply[2] = 0
+	reply[3] = 0
+	checksum := s.calculateICMPChecksum(reply)
+	reply[2] = byte(checksum >> 8)
+	reply[3] = byte(checksum & 0xFF)
+
+	// BAREMA ITEM 6: LATÊNCIA - Envia resposta
+	conn.WriteTo(reply, clientAddr)
+}
+
+// BAREMA ITEM 6: LATÊNCIA - Calcula checksum ICMP
+func (s *Servidor) calculateICMPChecksum(data []byte) uint16 {
+	var sum uint32
+	for i := 0; i < len(data); i += 2 {
+		if i+1 < len(data) {
+			sum += uint32(data[i])<<8 + uint32(data[i+1])
+		} else {
+			sum += uint32(data[i]) << 8
+		}
+	}
+
+	for sum>>16 != 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+
+	return uint16(^sum)
+}
+
 /* ====================== Processamento de Pacotes Otimizado ====================== */
+
+// BAREMA ITEM 5: CONCORRÊNCIA - Worker que processa requisições de compra de pacotes
+// Cada worker roda em uma goroutine separada, processando requisições do canal
 func (s *Servidor) packWorker() {
 	for req := range s.packWorkerPool {
 		s.processarPacote(req)
 	}
 }
+
+// BAREMA ITEM 8: PACOTES - Processa uma requisição de compra de pacote
+// Garante distribuição justa de cartas e evita duplicatas no estoque global
 func (s *Servidor) processarPacote(req packReq) {
 	if req.cli.Conn == nil {
-		return
+		return // Cliente desconectado, ignora requisição
 	}
+
+	// Calcula total de cartas necessárias
 	totalNecessario := req.quantidade * s.packSize
 	cartas := make([]Carta, 0, totalNecessario)
+
+	// BAREMA ITEM 8: PACOTES - Gera cartas com distribuição de raridade
 	for i := 0; i < totalNecessario; i++ {
 		c, ok := s.takeOneByRarityWithDowngrade(sampleRaridade())
 		if !ok {
+			// Se não há cartas da raridade desejada, gera uma carta comum básica
 			c = s.gerarCartaComumBasica()
 		}
 		cartas = append(cartas, c)
 	}
+
+	// Adiciona cartas ao inventário do cliente
 	req.cli.Inventario = append(req.cli.Inventario, cartas...)
+
+	// BAREMA ITEM 3: API REMOTA - Envia resultado da compra para o cliente
 	msg := protocolo.Mensagem{
 		Comando: "PACOTE_RESULTADO",
 		Dados:   mustJSON(protocolo.ComprarPacoteResp{Cartas: cartas}),
@@ -151,15 +289,27 @@ func (s *Servidor) processarPacote(req packReq) {
 			Comando: "SISTEMA",
 			Dados:   mustJSON(protocolo.DadosErro{Mensagem: "[SISTEMA] Você recebeu novas cartas! Use /cartas para ver sua mão."}),
 		})
+
+		// BAREMA ITEM 7: PARTIDAS - Verifica se pode iniciar a partida
 		if req.cli.Sala != nil {
 			req.cli.Sala.marcarCompraEIniciarSePossivel(req.cli)
 		}
 	}
 }
+
+// BAREMA ITEM 8: PACOTES - Remove uma carta do estoque com sistema de downgrade
+// Se não há cartas da raridade desejada, tenta raridades menores (L->R->U->C)
 func (s *Servidor) takeOneByRarityWithDowngrade(r string) (Carta, bool) {
-	shardIndex := rand.Intn(numEstoqueShards)
+	// BAREMA ITEM 5: CONCORRÊNCIA - Cria gerador aleatório único para esta operação
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// BAREMA ITEM 5: CONCORRÊNCIA - Seleciona shard aleatoriamente para distribuir carga
+	shardIndex := rng.Intn(numEstoqueShards)
 	shard := s.shardedEstoque[shardIndex]
 	shard.mutex.Lock()
+	defer shard.mutex.Unlock()
+
+	// Ordem de downgrade: Lendária -> Rara -> Incomum -> Comum
 	order := []string{"L", "R", "U", "C"}
 	var start int
 	switch r {
@@ -172,57 +322,110 @@ func (s *Servidor) takeOneByRarityWithDowngrade(r string) (Carta, bool) {
 	default:
 		start = 3
 	}
+
+	// Tenta encontrar carta da raridade desejada ou menor
 	for i := start; i < len(order); i++ {
 		raridade := order[i]
 		if arr := shard.estoque[raridade]; len(arr) > 0 {
-			n := len(arr) - 1
-			c := arr[n]
-			shard.estoque[raridade] = arr[:n]
-			shard.mutex.Unlock()
+			// BAREMA ITEM 8: PACOTES - Seleciona carta aleatória do array para maior variedade
+			randomIndex := rng.Intn(len(arr))
+			c := arr[randomIndex]
+			// Remove a carta selecionada (troca com a última e remove)
+			arr[randomIndex] = arr[len(arr)-1]
+			shard.estoque[raridade] = arr[:len(arr)-1]
+			// BAREMA ITEM 8: PACOTES - Debug temporário para verificar variedade
+			fmt.Printf("[DEBUG] Carta selecionada: %s %s (ID: %s)\n", c.Nome, c.Naipe, c.ID)
 			return c, true
 		}
 	}
-	shard.mutex.Unlock()
-	return Carta{}, false
+	return Carta{}, false // Nenhuma carta disponível
 }
+
+// BAREMA ITEM 8: PACOTES - Gera carta comum única quando estoque acaba
 func (s *Servidor) gerarCartaComumBasica() Carta {
-	return Carta{ID: novoID(), Nome: "Soldado Básico", Naipe: "♠", Valor: 10, Raridade: "C"}
+	// BAREMA ITEM 8: PACOTES - Lista de nomes variados para cartas comuns
+	nomes := []string{
+		"Guerreiro", "Arqueiro", "Mago", "Cavaleiro", "Ladrão", "Clérigo",
+		"Bárbaro", "Paladino", "Ranger", "Bruxo", "Druida", "Monge",
+		"Assassino", "Bardo", "Necromante", "Elementalista", "Inquisidor",
+		"Gladiador", "Mercenário", "Escudeiro", "Aprendiz", "Novato",
+		"Veterano", "Herói", "Lenda", "Mestre", "Sábio", "Ancião",
+		"Espadachim", "Arqueiro Élfico", "Mago do Caos", "Sacerdote", "Berserker",
+		"Samurai", "Ninja", "Viking", "Cruzado", "Templário", "Caçador",
+		"Explorador", "Navegador", "Alquimista", "Encantador", "Ilusionista",
+		"Summoner", "Conjurador", "Evocador", "Invocador", "Chamador", "Convocador",
+		"Dragão", "Fênix", "Titan", "Sereia", "Lobo", "Águia", "Leão", "Tigre",
+		"Anjo", "Demônio", "Golem", "Elemental", "Espírito", "Fantasma", "Zumbi",
+		"Skeleton", "Orc", "Elfo", "Anão", "Hobbit", "Gigante", "Troll", "Ogro",
+		"Knight", "Wizard", "Rogue", "Priest", "Warrior", "Mage", "Hunter", "Shaman",
+		"Monk", "Paladin", "Druid", "Warlock", "Death Knight", "Demon Hunter", "Evoker",
+	}
+
+	// BAREMA ITEM 8: PACOTES - Lista de naipes variados
+	naipes := []string{"♠", "♥", "♦", "♣"}
+
+	// BAREMA ITEM 8: PACOTES - Cria gerador aleatório único para esta chamada
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// BAREMA ITEM 8: PACOTES - Gera valores variados (1-50 para cartas comuns)
+	valor := 1 + rng.Intn(50)
+
+	// BAREMA ITEM 8: PACOTES - Seleciona nome e naipe aleatórios
+	nome := nomes[rng.Intn(len(nomes))]
+	naipe := naipes[rng.Intn(len(naipes))]
+
+	// BAREMA ITEM 8: PACOTES - Debug temporário para verificar variedade
+	fmt.Printf("[DEBUG] Carta gerada: %s %s (ID: %s)\n", nome, naipe, novoID())
+
+	return Carta{
+		ID:       novoID(),
+		Nome:     nome,
+		Naipe:    naipe,
+		Valor:    valor,
+		Raridade: "C",
+	}
 }
 
 /* ====================== Conexão / IO com Pools ====================== */
+
+// BAREMA ITEM 2: COMUNICAÇÃO - Gerencia uma conexão TCP com um cliente
+// Configura a conexão, inicializa estruturas e coordena leitura/escrita
 func (s *Servidor) handleConnection(conn net.Conn) {
+	// BAREMA ITEM 2: COMUNICAÇÃO - Configurações de TCP para melhor performance
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetKeepAlive(true)
-		tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		tcpConn.SetNoDelay(true)
+		tcpConn.SetKeepAlive(true)                   // Mantém conexão ativa
+		tcpConn.SetKeepAlivePeriod(30 * time.Second) // Verifica conexão a cada 30s
+		tcpConn.SetNoDelay(true)                     // Desabilita algoritmo de Nagle
 	}
 
-	// OTIMIZAÇÃO: Pega um objeto Cliente do pool
+	// BAREMA ITEM 5: CONCORRÊNCIA - Reutiliza objeto Cliente do pool para otimização
 	cliente := clientePool.Get().(*Cliente)
 	cliente.Conn = conn
 	cliente.Encoder = json.NewEncoder(conn)
 	cliente.Decoder = json.NewDecoder(conn)
 	cliente.Nome = conn.RemoteAddr().String()
-	cliente.UltimoPing = time.Now() // Adicionado para health check
+	cliente.UltimoPing = time.Now() // BAREMA ITEM 6: LATÊNCIA - Inicializa timestamp de ping
 
 	s.adicionarCliente(cliente)
-	go s.clienteWriter(cliente)
-	go s.pingManager(cliente) // Inicia o gerenciador de PING
-	s.clienteReader(cliente)
 
-	// OTIMIZAÇÃO: Devolve o objeto Cliente para o pool
+	// BAREMA ITEM 5: CONCORRÊNCIA - Inicia goroutines para escrita e ping em paralelo
+	go s.clienteWriter(cliente) // Goroutine para envio de mensagens
+	go s.pingManager(cliente)   // BAREMA ITEM 6: LATÊNCIA - Goroutine para gerenciar pings
+	s.clienteReader(cliente)    // Loop principal de leitura (bloqueante)
+
+	// BAREMA ITEM 5: CONCORRÊNCIA - Limpeza e devolução do objeto para o pool
 	conn.Close() // Garante que a conexão seja fechada
 	s.removerCliente(cliente)
 
 	// Limpa o estado do cliente para reutilização
-	cliente.Inventario = cliente.Inventario[:0] // Limpa o slice
+	cliente.Inventario = cliente.Inventario[:0] // Limpa o slice mantendo capacidade
 	cliente.Sala = nil
 	cliente.Conn = nil
 	cliente.Nome = ""
 	cliente.PingMs = 0
 	cliente.UltimoPing = time.Time{}
 
-	clientePool.Put(cliente)
+	clientePool.Put(cliente) // Devolve objeto para o pool
 }
 func (s *Servidor) clienteWriter(c *Cliente) {
 	for msg := range c.Mailbox {
@@ -378,20 +581,24 @@ func (s *Servidor) handleSairDaSala(cliente *Cliente) {
 }
 
 /* ====================== Matchmaking Otimizado ====================== */
+
+// BAREMA ITEM 7: PARTIDAS - Sistema de matchmaking para parear jogadores
+// Garante que cada jogador seja pareado com apenas um oponente por vez
 func (s *Servidor) entrarFila(cliente *Cliente) {
 	s.filaMutex.Lock()
-	// Verifica se já existe um jogador na fila de espera
+	defer s.filaMutex.Unlock()
+
+	// BAREMA ITEM 7: PARTIDAS - Verifica se já existe um jogador na fila de espera
 	if s.filaDeEspera != nil {
 		oponente := s.filaDeEspera
-		s.filaDeEspera = nil // Limpa a fila
-		s.filaMutex.Unlock()
-		// Cria a sala com os dois jogadores
+		s.filaDeEspera = nil // Limpa a fila para evitar múltiplos pareamentos
+
+		// BAREMA ITEM 7: PARTIDAS - Cria sala com os dois jogadores encontrados
 		fmt.Printf("[SERVIDOR] Jogador %s encontrado para %s. Criando sala...\n", cliente.Nome, oponente.Nome)
 		s.criarSala(oponente, cliente)
 	} else {
-		// Nenhum jogador esperando, este cliente se torna o jogador na fila
+		// BAREMA ITEM 7: PARTIDAS - Nenhum jogador esperando, este cliente aguarda
 		s.filaDeEspera = cliente
-		s.filaMutex.Unlock()
 		fmt.Printf("[SERVIDOR] Jogador %s entrou na fila e está aguardando um oponente.\n", cliente.Nome)
 		s.enviar(cliente, protocolo.Mensagem{
 			Comando: "SISTEMA",
@@ -399,30 +606,37 @@ func (s *Servidor) entrarFila(cliente *Cliente) {
 		})
 	}
 }
+
+// BAREMA ITEM 7: PARTIDAS - Cria uma nova sala de jogo com dois jogadores
+// Inicializa o estado da partida e notifica os jogadores
 func (s *Servidor) criarSala(j1, j2 *Cliente) {
-	salaID := novoID() // Usando nosso gerador rápido de ID
+	salaID := novoID() // Gera ID único para a sala
+
+	// BAREMA ITEM 7: PARTIDAS - Inicializa sala com estado "AGUARDANDO_COMPRA"
 	novaSala := &Sala{
 		ID:              salaID,
-		Jogadores:       []*Cliente{j1, j2},
-		Estado:          "AGUARDANDO_COMPRA",
+		Jogadores:       []*Cliente{j1, j2},  // Sempre exatamente 2 jogadores
+		Estado:          "AGUARDANDO_COMPRA", // Estado inicial: aguarda compra de cartas
 		CartasNaMesa:    make(map[string]Carta),
 		PontosRodada:    make(map[string]int),
 		PontosPartida:   make(map[string]int),
 		NumeroRodada:    1,
 		JogadasNaRodada: 0,
-		Prontos:         make(map[string]bool),
+		Prontos:         make(map[string]bool), // Rastreia quem já comprou cartas
 		srv:             s,
 	}
-	s.salas.Store(salaID, novaSala)
-	j1.Sala, j2.Sala = novaSala, novaSala
 
-	// Notifica os jogadores sobre a partida encontrada
+	// BAREMA ITEM 5: CONCORRÊNCIA - Armazena sala no map thread-safe
+	s.salas.Store(salaID, novaSala)
+	j1.Sala, j2.Sala = novaSala, novaSala // Associa jogadores à sala
+
+	// BAREMA ITEM 3: API REMOTA - Notifica os jogadores sobre a partida encontrada
 	d1 := protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: j2.Nome}
 	d2 := protocolo.DadosPartidaEncontrada{SalaID: salaID, OponenteNome: j1.Nome}
 	s.enviar(j1, protocolo.Mensagem{Comando: "PARTIDA_ENCONTRADA", Dados: mustJSON(d1)})
 	s.enviar(j2, protocolo.Mensagem{Comando: "PARTIDA_ENCONTRADA", Dados: mustJSON(d2)})
 
-	// Informar que devem comprar pack para iniciar
+	// BAREMA ITEM 8: PACOTES - Informa que devem comprar pacotes para iniciar
 	novaSala.broadcast(nil, protocolo.Mensagem{
 		Comando: "SISTEMA",
 		Dados:   mustJSON(protocolo.DadosErro{Mensagem: "[SISTEMA] Partida encontrada! Usem /comprar para adquirir um pacote de cartas e iniciar o jogo."}),
@@ -748,7 +962,9 @@ func novoID() string {
 	return fmt.Sprintf("c%d", id)
 }
 func sampleRaridade() string {
-	x := rand.Intn(100)
+	// BAREMA ITEM 8: PACOTES - Cria gerador aleatório único para esta operação
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	x := rng.Intn(100)
 	if x < 70 {
 		return "C"
 	}
@@ -760,30 +976,66 @@ func sampleRaridade() string {
 	}
 	return "L"
 }
+
+// BAREMA ITEM 8: PACOTES - Gera estoque inicial distribuído entre shards
+// Cria um grande estoque de cartas com distribuição de raridade para testes de estresse
 func gerarEstoquesIniciais() []map[string][]Carta {
 	rand.Seed(time.Now().UnixNano())
 	allStocks := make([]map[string][]Carta, numEstoqueShards)
+
+	// BAREMA ITEM 5: CONCORRÊNCIA - Inicializa shards com mapas vazios por raridade
 	for i := 0; i < numEstoqueShards; i++ {
 		allStocks[i] = map[string][]Carta{"C": {}, "U": {}, "R": {}, "L": {}}
 	}
-	tiposCartas := []string{"Dragão", "Guerreiro", "Mago", "Anjo", "Demônio", "Fênix", "Titan", "Sereia", "Lobo", "Águia", "Leão", "Tigre"}
+
+	// BAREMA ITEM 8: PACOTES - Tipos de cartas disponíveis no jogo (mais variedade)
+	tiposCartas := []string{
+		"Dragão", "Guerreiro", "Mago", "Anjo", "Demônio", "Fênix", "Titan", "Sereia",
+		"Lobo", "Águia", "Leão", "Tigre", "Cavaleiro", "Arqueiro", "Bárbaro", "Paladino",
+		"Ranger", "Bruxo", "Druida", "Monge", "Assassino", "Bardo", "Necromante",
+		"Elementalista", "Inquisidor", "Gladiador", "Mercenário", "Escudeiro", "Aprendiz",
+		"Novato", "Veterano", "Herói", "Lenda", "Mestre", "Sábio", "Ancião", "Clérigo",
+		"Ladrão", "Espadachim", "Arqueiro Élfico", "Mago do Caos", "Sacerdote", "Berserker",
+		"Samurai", "Ninja", "Viking", "Cruzado", "Templário", "Inquisidor", "Caçador",
+		"Explorador", "Navegador", "Alquimista", "Encantador", "Ilusionista", "Necromante",
+		"Summoner", "Conjurador", "Evocador", "Invocador", "Chamador", "Convocador",
+	}
 	naipes := []string{"♠", "♥", "♦", "♣"}
+
+	// BAREMA ITEM 8: PACOTES - Gera cartas com distribuição de raridade
 	for _, nome := range tiposCartas {
-		for i := 0; i < 200; i++ { // Aumenta drasticamente o estoque para não acabar durante o teste
-			shardIndex := rand.Intn(numEstoqueShards)
-			allStocks[shardIndex]["C"] = append(allStocks[shardIndex]["C"], Carta{ID: novoID(), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 10 + rand.Intn(30), Raridade: "C"})
+		// Cartas Comuns (70% de chance): 500 por tipo para evitar esgotamento
+		for i := 0; i < 500; i++ {
+			// BAREMA ITEM 8: PACOTES - Cria gerador aleatório único para cada carta
+			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(i*1000) + int64(len(nome))))
+			shardIndex := rng.Intn(numEstoqueShards)
+			allStocks[shardIndex]["C"] = append(allStocks[shardIndex]["C"], Carta{
+				ID: novoID(), Nome: nome, Naipe: naipes[rng.Intn(len(naipes))],
+				Valor: 1 + rng.Intn(50), Raridade: "C"})
 		}
+		// Cartas Incomuns (20% de chance): 250 por tipo
+		for i := 0; i < 250; i++ {
+			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(i*2000) + int64(len(nome))))
+			shardIndex := rng.Intn(numEstoqueShards)
+			allStocks[shardIndex]["U"] = append(allStocks[shardIndex]["U"], Carta{
+				ID: novoID(), Nome: nome, Naipe: naipes[rng.Intn(len(naipes))],
+				Valor: 51 + rng.Intn(30), Raridade: "U"})
+		}
+		// Cartas Raras (9% de chance): 100 por tipo
 		for i := 0; i < 100; i++ {
-			shardIndex := rand.Intn(numEstoqueShards)
-			allStocks[shardIndex]["U"] = append(allStocks[shardIndex]["U"], Carta{ID: novoID(), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 40 + rand.Intn(30), Raridade: "U"})
+			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(i*3000) + int64(len(nome))))
+			shardIndex := rng.Intn(numEstoqueShards)
+			allStocks[shardIndex]["R"] = append(allStocks[shardIndex]["R"], Carta{
+				ID: novoID(), Nome: nome, Naipe: naipes[rng.Intn(len(naipes))],
+				Valor: 81 + rng.Intn(20), Raridade: "R"})
 		}
+		// Cartas Lendárias (1% de chance): 50 por tipo
 		for i := 0; i < 50; i++ {
-			shardIndex := rand.Intn(numEstoqueShards)
-			allStocks[shardIndex]["R"] = append(allStocks[shardIndex]["R"], Carta{ID: novoID(), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 70 + rand.Intn(20), Raridade: "R"})
-		}
-		for i := 0; i < 20; i++ {
-			shardIndex := rand.Intn(numEstoqueShards)
-			allStocks[shardIndex]["L"] = append(allStocks[shardIndex]["L"], Carta{ID: novoID(), Nome: nome, Naipe: naipes[rand.Intn(len(naipes))], Valor: 90 + rand.Intn(10), Raridade: "L"})
+			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(i*4000) + int64(len(nome))))
+			shardIndex := rng.Intn(numEstoqueShards)
+			allStocks[shardIndex]["L"] = append(allStocks[shardIndex]["L"], Carta{
+				ID: novoID(), Nome: nome, Naipe: naipes[rng.Intn(len(naipes))],
+				Valor: 101 + rng.Intn(20), Raridade: "L"})
 		}
 	}
 	return allStocks

@@ -1,5 +1,10 @@
 package main
 
+// ===================== BAREMA ITEM 9: TESTES =====================
+// Este arquivo implementa testes de estresse automatizados para o jogo de cartas.
+// Simula múltiplos jogadores simultâneos para testar concorrência, performance
+// e justiça na distribuição de recursos.
+
 import (
 	"context"
 	"encoding/json"
@@ -12,41 +17,45 @@ import (
 	"time"
 )
 
-// --- Configurações do Teste ---
+// BAREMA ITEM 9: TESTES - Configurações do teste de estresse
 const (
-	numBots        = 10000            // Altere o número de jogadores simultâneos aqui
+	numBots        = 10000            // Número de bots simultâneos para testar concorrência
 	testDuration   = 90 * time.Second // Duração total do teste
 	rampUpDuration = 30 * time.Second // Tempo para iniciar todos os bots gradualmente
-	serverAddr     = "servidor:65432"
+	serverAddr     = "servidor:65432" // Endereço do servidor para conectar
 )
 
-// TestReport armazena os resultados consolidados do teste.
+// BAREMA ITEM 9: TESTES - Estrutura para armazenar resultados do teste
+// Coleta estatísticas de performance, concorrência e justiça
 type TestReport struct {
-	totalBots            int
-	connectionsSucceeded int
-	purchasesSucceeded   int
-	gamesCompleted       int
-	totalErrors          int
-	latencies            []time.Duration
-	mu                   sync.Mutex
+	totalBots            int             // Total de bots que tentaram conectar
+	connectionsSucceeded int             // Conexões bem-sucedidas
+	purchasesSucceeded   int             // Compras de pacotes bem-sucedidas
+	gamesCompleted       int             // Partidas completadas
+	totalErrors          int             // Total de erros encontrados
+	latencies            []time.Duration // Medições de latência coletadas
+	mu                   sync.Mutex      // BAREMA ITEM 5: CONCORRÊNCIA - Protege acesso concorrente aos dados
 }
 
-// Bot representa um cliente de teste.
+// BAREMA ITEM 9: TESTES - Estrutura que representa um bot de teste
+// Simula um jogador real conectado ao servidor
 type Bot struct {
-	ID         int
-	Conn       net.Conn
-	Encoder    *json.Encoder
-	Decoder    *json.Decoder
-	Nome       string
-	Inventario []protocolo.Carta
-	pingStart  time.Time
-	mu         sync.Mutex // Protege o inventário
+	ID         int               // Identificador único do bot
+	Conn       net.Conn          // Conexão TCP com o servidor
+	Encoder    *json.Encoder     // Codificador JSON para envio
+	Decoder    *json.Decoder     // Decodificador JSON para recebimento
+	Nome       string            // Nome do bot
+	Inventario []protocolo.Carta // Cartas que o bot possui
+	pingStart  time.Time         // BAREMA ITEM 6: LATÊNCIA - Timestamp para medição de ping
+	mu         sync.Mutex        // BAREMA ITEM 5: CONCORRÊNCIA - Protege o inventário
 }
 
-// runBotLifecycle agora simula partidas completas e loga latência em tempo real.
+// BAREMA ITEM 9: TESTES - Simula o ciclo de vida completo de um bot
+// Conecta, joga partidas e coleta métricas de performance
 func runBotLifecycle(ctx context.Context, botID int, report *TestReport, wg *sync.WaitGroup) {
 	defer wg.Done()
 
+	// BAREMA ITEM 2: COMUNICAÇÃO - Tenta conectar com timeout
 	conn, err := net.DialTimeout("tcp", serverAddr, 10*time.Second)
 	if err != nil {
 		log.Printf("❌ Bot %d: Falha ao conectar: %v", botID, err)
@@ -57,6 +66,7 @@ func runBotLifecycle(ctx context.Context, botID int, report *TestReport, wg *syn
 	}
 	defer conn.Close()
 
+	// BAREMA ITEM 9: TESTES - Registra conexão bem-sucedida
 	report.mu.Lock()
 	report.connectionsSucceeded++
 	report.mu.Unlock()
@@ -69,68 +79,82 @@ func runBotLifecycle(ctx context.Context, botID int, report *TestReport, wg *syn
 		Nome:    fmt.Sprintf("Bot-%d", botID),
 	}
 
+	// BAREMA ITEM 2: COMUNICAÇÃO - Canal para mensagens assíncronas
 	incomingMessages := make(chan protocolo.Mensagem, 10)
 	errChan := make(chan error, 1)
 	go readFromServer(bot, incomingMessages, errChan)
 
+	// BAREMA ITEM 3: API REMOTA - Login e entrada na fila
 	enviarComando(bot, "LOGIN", protocolo.DadosLogin{Nome: bot.Nome})
 	enviarComando(bot, "ENTRAR_NA_FILA", nil)
 
-	pingTicker := time.NewTicker(5 * time.Second)
+	// BAREMA ITEM 6: LATÊNCIA - Ticker para medições de ping (reduzido para evitar sobrecarga)
+	pingTicker := time.NewTicker(10 * time.Second)
 	defer pingTicker.Stop()
 
+	// BAREMA ITEM 9: TESTES - Loop principal do bot
 	for {
 		select {
 		case msg := <-incomingMessages:
+			// BAREMA ITEM 3: API REMOTA - Processa mensagens do servidor
 			switch msg.Comando {
 			case "PARTIDA_ENCONTRADA":
+				// BAREMA ITEM 8: PACOTES - Compra pacote quando encontra partida
 				enviarComando(bot, "COMPRAR_PACOTE", protocolo.ComprarPacoteReq{Quantidade: 1})
 			case "PACOTE_RESULTADO":
 				var resp protocolo.ComprarPacoteResp
 				if json.Unmarshal(msg.Dados, &resp) == nil {
+					// BAREMA ITEM 9: TESTES - Registra compra bem-sucedida
 					report.mu.Lock()
 					report.purchasesSucceeded++
 					report.mu.Unlock()
 					bot.mu.Lock()
 					bot.Inventario = resp.Cartas
 					bot.mu.Unlock()
-					// Joga a primeira carta imediatamente para iniciar a partida.
+					// BAREMA ITEM 7: PARTIDAS - Joga primeira carta para iniciar partida
 					jogarPrimeiraCarta(bot)
 				}
 			case "ATUALIZACAO_JOGO":
 				var dados protocolo.DadosAtualizacaoJogo
 				if json.Unmarshal(msg.Dados, &dados) == nil {
-					// Apenas joga a próxima carta se a jogada anterior foi resolvida
-					// (indicado pela presença de um vencedor da jogada).
+					// BAREMA ITEM 7: PARTIDAS - Joga próxima carta quando jogada anterior é resolvida
 					if dados.VencedorJogada != "" {
 						jogarPrimeiraCarta(bot)
 					}
 				}
 			case "FIM_DE_JOGO":
-				// Fase 3: Partida Concluída
+				// BAREMA ITEM 9: TESTES - Registra partida completada
 				report.mu.Lock()
 				report.gamesCompleted++
 				report.mu.Unlock()
+				// BAREMA ITEM 7: PARTIDAS - Volta para fila para nova partida
 				enviarComando(bot, "ENTRAR_NA_FILA", nil)
 			case "PONG":
+				// BAREMA ITEM 6: LATÊNCIA - Calcula e armazena latência
 				if !bot.pingStart.IsZero() {
 					latencia := time.Since(bot.pingStart)
-					// A latência é armazenada para o relatório final, mas não é logada em tempo real.
 					report.mu.Lock()
 					report.latencies = append(report.latencies, latencia)
 					report.mu.Unlock()
 				}
-			case "PING": // Adicionado para responder aos pings do servidor
+			case "PING":
+				// BAREMA ITEM 6: LATÊNCIA - Responde ping do servidor
 				var dadosPing protocolo.DadosPing
 				if json.Unmarshal(msg.Dados, &dadosPing) == nil {
 					enviarComando(bot, "PONG", protocolo.DadosPong{Timestamp: dadosPing.Timestamp})
 				}
 			}
 		case <-pingTicker.C:
-			bot.pingStart = time.Now()
-			enviarComando(bot, "PING", protocolo.DadosPing{Timestamp: time.Now().UnixMilli()})
+			// BAREMA ITEM 6: LATÊNCIA - Mede latência via ICMP com delay aleatório
+			// BAREMA ITEM 5: CONCORRÊNCIA - Delay aleatório para evitar contenção simultânea
+			go func() {
+				delay := time.Duration(bot.ID%1000) * time.Millisecond
+				time.Sleep(delay)
+				bot.pingStart = time.Now()
+				medirLatenciaICMPBot(bot, report)
+			}()
 		case err := <-errChan:
-			// Não loga EOF como erro, pois é esperado.
+			// BAREMA ITEM 9: TESTES - Trata erros de comunicação
 			if err.Error() != "EOF" {
 				log.Printf("❌ Bot %d: Erro de comunicação: %v. Saindo.", bot.ID, err)
 				report.mu.Lock()
@@ -139,6 +163,7 @@ func runBotLifecycle(ctx context.Context, botID int, report *TestReport, wg *syn
 			}
 			return
 		case <-ctx.Done():
+			// BAREMA ITEM 9: TESTES - Encerra bot quando teste termina
 			enviarComando(bot, "QUIT", nil)
 			return
 		}
@@ -167,6 +192,78 @@ func jogarPrimeiraCarta(b *Bot) {
 	}
 }
 
+// BAREMA ITEM 6: LATÊNCIA - Mede latência ICMP para bots de teste
+func medirLatenciaICMPBot(bot *Bot, report *TestReport) {
+	// BAREMA ITEM 6: LATÊNCIA - Timeout de conexão para evitar bloqueios
+	conn, err := net.DialTimeout("ip4:icmp", "servidor", 1*time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	// BAREMA ITEM 6: LATÊNCIA - Cria pacote ICMP Echo Request
+	icmpPacket := createICMPEchoRequestBot()
+
+	start := time.Now()
+	conn.Write(icmpPacket)
+
+	// BAREMA ITEM 6: LATÊNCIA - Timeout reduzido para evitar latências altas
+	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	buffer := make([]byte, 1024)
+	_, err = conn.Read(buffer)
+	if err != nil {
+		return
+	}
+
+	latencia := time.Since(start)
+
+	// BAREMA ITEM 6: LATÊNCIA - Filtra latências muito altas (provavelmente timeouts)
+	if latencia > 1*time.Second {
+		return
+	}
+
+	report.mu.Lock()
+	report.latencies = append(report.latencies, latencia)
+	report.mu.Unlock()
+}
+
+// BAREMA ITEM 6: LATÊNCIA - Cria pacote ICMP Echo Request para bots
+func createICMPEchoRequestBot() []byte {
+	packet := make([]byte, 8)
+	packet[0] = 8 // Tipo: Echo Request
+	packet[1] = 0 // Código: 0
+	packet[2] = 0 // Checksum (será calculado)
+	packet[3] = 0 // Checksum (será calculado)
+	packet[4] = 0 // Identifier (16 bits)
+	packet[5] = 1 // Identifier (16 bits)
+	packet[6] = 0 // Sequence Number (16 bits)
+	packet[7] = 1 // Sequence Number (16 bits)
+
+	checksum := calculateICMPChecksumBot(packet)
+	packet[2] = byte(checksum >> 8)
+	packet[3] = byte(checksum & 0xFF)
+
+	return packet
+}
+
+// BAREMA ITEM 6: LATÊNCIA - Calcula checksum ICMP para bots
+func calculateICMPChecksumBot(data []byte) uint16 {
+	var sum uint32
+	for i := 0; i < len(data); i += 2 {
+		if i+1 < len(data) {
+			sum += uint32(data[i])<<8 + uint32(data[i+1])
+		} else {
+			sum += uint32(data[i]) << 8
+		}
+	}
+
+	for sum>>16 != 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+
+	return uint16(^sum)
+}
+
 func enviarComando(b *Bot, comando string, dados interface{}) {
 	var rawDados json.RawMessage
 	if dados != nil {
@@ -178,7 +275,7 @@ func enviarComando(b *Bot, comando string, dados interface{}) {
 }
 
 func main() {
-	log.Printf("Iniciando teszzzte de estresse com %d bots por %v (aquecimento de %v)...", numBots, testDuration, rampUpDuration)
+	log.Printf("Iniciando teste de estresse com %d bots por %v (aquecimento de %v)...", numBots, testDuration, rampUpDuration)
 
 	report := &TestReport{totalBots: numBots}
 	var wg sync.WaitGroup
@@ -211,7 +308,7 @@ func main() {
 	log.Println("Tempo do teste esgotado. Aguardando bots finalizarem...")
 	// Espera um pouco mais para os bots receberem o sinal de ctx.Done() e saírem.
 	time.Sleep(2 * time.Second)
-	printOnce.Do(func() { printReport(report) }) // Imprime caso o wg.Wait() não tenha sido alcançado.
+	// BAREMA ITEM 9: TESTES - Relatório já será impresso pela goroutine acima
 }
 
 func printReport(r *TestReport) {

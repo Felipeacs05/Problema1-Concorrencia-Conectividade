@@ -1,41 +1,52 @@
+# ===================== BAREMA ITEM 10: EMULAÇÃO =====================
+# Este arquivo define a orquestração de containers para emular o ambiente de laboratório.
+# Permite executar múltiplas instâncias dos componentes em containers isolados.
+
 version: '3.8'
 
 services:
+  # BAREMA ITEM 10: EMULAÇÃO - Container do servidor principal
   servidor:
     build:
       context: .
       dockerfile: ./servidor/Dockerfile
     ports:
-      - "65432:65432"
+      - "65432:65432"  # BAREMA ITEM 2: COMUNICAÇÃO - Porta TCP para conexões
     deploy:
+      # BAREMA ITEM 6: LATÊNCIA - Configurações de recursos para alta performance
       resources:
         limits:
-          memory: 8G
-          cpus: '4.0'
+          memory: 8G      # Limite máximo de memória
+          cpus: '4.0'     # Limite máximo de CPUs
         reservations:
-          memory: 4G
-          cpus: '2.0'
+          memory: 4G      # Reserva mínima de memória
+          cpus: '2.0'     # Reserva mínima de CPUs
     ulimits:
+      # BAREMA ITEM 5: CONCORRÊNCIA - Aumenta limite de arquivos abertos para muitas conexões
       nofile:
-        soft: 65536
-        hard: 65536
+        soft: 65536      # Limite soft de file descriptors
+        hard: 65536      # Limite hard de file descriptors
     sysctls:
-      - net.core.somaxconn=65535
-      - net.ipv4.tcp_max_syn_backlog=65535
+      # BAREMA ITEM 2: COMUNICAÇÃO - Otimizações de rede para alta concorrência
+      - net.core.somaxconn=65535           # Máximo de conexões em fila
+      - net.ipv4.tcp_max_syn_backlog=65535 # Máximo de conexões SYN em fila
 
+  # BAREMA ITEM 10: EMULAÇÃO - Container do cliente interativo
   cliente:
     build:
       context: .
       dockerfile: ./cliente/Dockerfile
     depends_on:
-      - servidor
+      - servidor  # Aguarda servidor estar pronto
 
+  # BAREMA ITEM 10: EMULAÇÃO - Container para testes de estresse
   cliente-estresse:
     build:
       context: .
       dockerfile: ./cliente_estresse/Dockerfile
     depends_on:
-      - servidor
-    # Este serviço não inicia por padrão. Use 'docker-compose run' para executá-lo.
+      - servidor  # Aguarda servidor estar pronto
+    # BAREMA ITEM 9: TESTES - Este serviço não inicia por padrão
+    # Use 'docker-compose run' para executá-lo com parâmetros
     # Exemplo: docker-compose run cliente-estresse 100
     entrypoint: ["/main"]

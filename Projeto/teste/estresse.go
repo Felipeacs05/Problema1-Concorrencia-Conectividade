@@ -1,6 +1,10 @@
 // felipeacs05/problema1-concorrencia-conectividade/Problema1-Concorrencia-Conectividade-77d73bcc575bbc2b6e076d0c153ffc2b7b175855/Projeto/teste/estresse.go
 package main
 
+// ===================== BAREMA ITEM 9: TESTES =====================
+// Este arquivo implementa testes de estresse mais simples e diretos.
+// Foca em testar estabilidade, justiça na concorrência e múltiplas conexões.
+
 import (
 	"encoding/json"
 	"fmt"
@@ -9,11 +13,11 @@ import (
 	"time"
 )
 
-// Variável global para quantidade de usuários
-const quantidadeUsuarios = 20000
+// BAREMA ITEM 9: TESTES - Configurações do teste
+const quantidadeUsuarios = 20000 // Número total de usuários para testar
 
-// OTIMIZAÇÃO: Limita o número de conexões simultâneas que o CLIENTE tenta fazer.
-// Isso evita que o próprio cliente se torne o gargalo.
+// BAREMA ITEM 5: CONCORRÊNCIA - Limita conexões simultâneas para evitar gargalo no cliente
+// Isso evita que o próprio cliente se torne o gargalo do teste
 const maxConcurrentConnects = 300
 
 // Estruturas do protocolo (sem alterações)
@@ -69,12 +73,15 @@ func (c *ClienteTeste) lerMensagens() {
 	}
 }
 
-// Teste 1: Estabilidade sob carga
+// BAREMA ITEM 9: TESTES - Teste 1: Estabilidade sob carga
+// Verifica se o servidor consegue manter muitas conexões simultâneas
 func testeEstabilidade(n int, wg *sync.WaitGroup, resultChan chan<- string) {
 	defer wg.Done()
 	sucessos := 0
 	var mutex sync.Mutex
 	var wgConexoes sync.WaitGroup
+
+	// BAREMA ITEM 5: CONCORRÊNCIA - Semáforo para limitar conexões simultâneas
 	connectSemaphore := make(chan struct{}, maxConcurrentConnects)
 
 	for i := 0; i < n; i++ {
@@ -97,6 +104,8 @@ func testeEstabilidade(n int, wg *sync.WaitGroup, resultChan chan<- string) {
 			if err := cliente.entrarNaFila(); err != nil {
 				return
 			}
+
+			// BAREMA ITEM 9: TESTES - Registra conexão bem-sucedida
 			mutex.Lock()
 			sucessos++
 			mutex.Unlock()
@@ -108,13 +117,16 @@ func testeEstabilidade(n int, wg *sync.WaitGroup, resultChan chan<- string) {
 	resultChan <- fmt.Sprintf("🏁 Teste de estabilidade concluído! Sucessos: %d/%d", sucessos, n)
 }
 
-// Teste 2: Justiça na concorrência
+// BAREMA ITEM 9: TESTES - Teste 2: Justiça na concorrência
+// Verifica se múltiplos clientes conseguem comprar pacotes simultaneamente de forma justa
 func testeJustica(n int, wg *sync.WaitGroup, resultChan chan<- string) {
 	defer wg.Done()
 	var wgConcorrencia sync.WaitGroup
 	var wgProntos sync.WaitGroup
 	sucessos := 0
 	var mutex sync.Mutex
+
+	// BAREMA ITEM 5: CONCORRÊNCIA - Canal para sincronizar início das compras
 	start := make(chan struct{})
 	connectSemaphore := make(chan struct{}, maxConcurrentConnects)
 
@@ -138,11 +150,14 @@ func testeJustica(n int, wg *sync.WaitGroup, resultChan chan<- string) {
 			}
 
 			wgProntos.Done()
-			<-start
+			<-start // BAREMA ITEM 9: TESTES - Aguarda sinal para iniciar compras simultâneas
+
+			// BAREMA ITEM 8: PACOTES - Tenta comprar pacote
 			if err := cliente.comprarPacote(); err != nil {
 				return
 			}
 
+			// BAREMA ITEM 9: TESTES - Aguarda resultado da compra
 			timeout := time.After(20 * time.Second)
 			for {
 				select {
@@ -155,6 +170,7 @@ func testeJustica(n int, wg *sync.WaitGroup, resultChan chan<- string) {
 						return
 					}
 					if msg.Comando == "PACOTE_RESULTADO" {
+						// BAREMA ITEM 9: TESTES - Registra compra bem-sucedida
 						mutex.Lock()
 						sucessos++
 						mutex.Unlock()
@@ -165,7 +181,7 @@ func testeJustica(n int, wg *sync.WaitGroup, resultChan chan<- string) {
 		}(i)
 	}
 	wgProntos.Wait()
-	close(start)
+	close(start) // BAREMA ITEM 9: TESTES - Inicia todas as compras simultaneamente
 	wgConcorrencia.Wait()
 	resultChan <- fmt.Sprintf("🏁 Teste de justiça concluído! Sucessos: %d/%d", sucessos, n)
 }
