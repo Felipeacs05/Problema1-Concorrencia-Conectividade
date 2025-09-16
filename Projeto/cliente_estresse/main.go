@@ -55,10 +55,21 @@ type Bot struct {
 func runBotLifecycle(ctx context.Context, botID int, report *TestReport, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	// BAREMA ITEM 2: COMUNICAÇÃO - Tenta conectar com timeout
-	conn, err := net.DialTimeout("tcp", serverAddr, 10*time.Second)
+	// BAREMA ITEM 2: COMUNICAÇÃO - Tenta conectar com timeout e retry
+	var conn net.Conn
+	var err error
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		conn, err = net.DialTimeout("tcp", serverAddr, 5*time.Second)
+		if err == nil {
+			break
+		}
+		if i < maxRetries-1 {
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
 	if err != nil {
-		log.Printf("❌ Bot %d: Falha ao conectar: %v", botID, err)
+		log.Printf("❌ Bot %d: Falha ao conectar após %d tentativas: %v", botID, maxRetries, err)
 		report.mu.Lock()
 		report.totalErrors++
 		report.mu.Unlock()
@@ -276,6 +287,10 @@ func enviarComando(b *Bot, comando string, dados interface{}) {
 
 func main() {
 	log.Printf("Iniciando teste de estresse com %d bots por %v (aquecimento de %v)...", numBots, testDuration, rampUpDuration)
+
+	// BAREMA ITEM 9: TESTES - Aguarda servidor estar pronto antes de iniciar bots
+	log.Println("Aguardando servidor estar disponível...")
+	time.Sleep(5 * time.Second)
 
 	report := &TestReport{totalBots: numBots}
 	var wg sync.WaitGroup

@@ -45,7 +45,8 @@ services:
       context: .
       dockerfile: ./cliente_estresse/Dockerfile
     depends_on:
-      - servidor  # Aguarda servidor estar pronto
+      servidor:
+        condition: service_started  # Aguarda servidor estar iniciado
     # BAREMA ITEM 9: TESTES - Este serviço não inicia por padrão
     # Use 'docker-compose run' para executá-lo com parâmetros
     # Exemplo: docker-compose run cliente-estresse 100
