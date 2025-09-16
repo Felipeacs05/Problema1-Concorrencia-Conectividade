@@ -333,8 +333,6 @@ func (s *Servidor) takeOneByRarityWithDowngrade(r string) (Carta, bool) {
 			// Remove a carta selecionada (troca com a última e remove)
 			arr[randomIndex] = arr[len(arr)-1]
 			shard.estoque[raridade] = arr[:len(arr)-1]
-			// BAREMA ITEM 8: PACOTES - Debug temporário para verificar variedade
-			fmt.Printf("[DEBUG] Carta selecionada: %s %s (ID: %s)\n", c.Nome, c.Naipe, c.ID)
 			return c, true
 		}
 	}
@@ -373,9 +371,6 @@ func (s *Servidor) gerarCartaComumBasica() Carta {
 	// BAREMA ITEM 8: PACOTES - Seleciona nome e naipe aleatórios
 	nome := nomes[rng.Intn(len(nomes))]
 	naipe := naipes[rng.Intn(len(naipes))]
-
-	// BAREMA ITEM 8: PACOTES - Debug temporário para verificar variedade
-	fmt.Printf("[DEBUG] Carta gerada: %s %s (ID: %s)\n", nome, naipe, novoID())
 
 	return Carta{
 		ID:       novoID(),
