@@ -45,7 +45,7 @@ Para executar o projeto, você precisará ter o **Docker** e o **Docker Compose*
 
 1.  **Clone o repositório:**
     ```bash
-    git clone [https://github.com/Felipeacs05/Problema1-Concorrencia-Conectividade](https://github.com/Felipeacs05/Problema1-Concorrencia-Conectividade)
+    git clone https://github.com/Felipeacs05/Problema1-Concorrencia-Conectividade
     cd Problema1-Concorrencia-Conectividade/Projeto/
     ```
 
@@ -61,11 +61,11 @@ Para executar o projeto, você precisará ter o **Docker** e o **Docker Compose*
 
     * **Terminal do Jogador A:**
         ```bash
-        docker compose run --rm cliente
+        docker compose run --name cliente_a cliente
         ```
     * **Terminal do Jogador B:**
         ```bash
-        docker compose run --rm cliente
+        docker compose run --name cliente_b cliente
         ```
 
 4.  **Jogue a Partida:**
@@ -86,7 +86,7 @@ Para simular uma grande quantidade de jogadores e testar a performance do servid
 
 ```bash
 # Inicie o servidor primeiro (em modo detached)
-docker compose up -d servidor
+docker compose up --build servidor
 
 # Execute o teste de estresse
-docker compose run --rm cliente-estresse
+docker compose up --build cliente-estresse
